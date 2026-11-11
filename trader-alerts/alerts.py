@@ -100,6 +100,53 @@ class AlertError(Exception):
     pass
 
 
+# ---------------------------------------------------------------- markets (the same rules as trader-entry)
+
+CCYS = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "SEK", "NOK", "DKK", "MXN", "ZAR",
+        "SGD", "HKD", "CNH", "TRY", "PLN", "INR")
+METALS = {"XAUUSD": {"yahoo": "GC=F", "name": "gold", "decimals": 2},
+          "XAGUSD": {"yahoo": "SI=F", "name": "silver", "decimals": 3}}
+METAL_ALIASES = {"XAUUSD": "XAUUSD", "XAU": "XAUUSD", "GC=F": "XAUUSD",
+                 "XAGUSD": "XAGUSD", "XAG": "XAGUSD", "SI=F": "XAGUSD"}
+FX_CLOSED = {"01-01": "New Year's Day", "12-25": "Christmas Day"}
+
+
+def instrument(sym):
+    """What a symbol is: {market: stock | forex | metal, symbol, yahoo, decimals, pip, unit}.
+    EURUSD, EUR/USD, EUR_USD and EURUSD=X are one forex pair; XAUUSD, XAU and GC=F are gold."""
+    raw = str(sym or "").strip().upper()
+    flat = re.sub(r"[/_\-\s]", "", raw)
+    if flat.endswith("=X"):
+        flat = flat[:-2]
+    metal = METAL_ALIASES.get(raw) or METAL_ALIASES.get(flat)
+    if metal:
+        m = METALS[metal]
+        return {"market": "metal", "symbol": metal, "yahoo": m["yahoo"], "decimals": m["decimals"],
+                "pip": None, "unit": "ounce", "name": m["name"], "base": metal[:3], "quote": "USD"}
+    if len(flat) == 6 and flat.isalpha() and flat[:3] in CCYS and flat[3:] in CCYS and flat[:3] != flat[3:]:
+        dec = 3 if flat[3:] == "JPY" else 5
+        return {"market": "forex", "symbol": flat, "yahoo": flat + "=X", "decimals": dec,
+                "pip": 10.0 ** -(dec - 1), "unit": "unit", "name": flat[:3] + "/" + flat[3:],
+                "base": flat[:3], "quote": flat[3:]}
+    return {"market": "stock", "symbol": raw, "yahoo": raw.replace(".", "-"), "decimals": 2,
+            "pip": None, "unit": "share", "name": raw, "base": raw, "quote": "USD"}
+
+
+def px(inst, x):
+    """A price for a person: $364.18 for a stock or a metal, 1.11371 for a pair."""
+    if inst["market"] == "forex":
+        return "%.*f" % (inst["decimals"], x)
+    return "$%.*f" % (inst["decimals"], x)
+
+
+def fx_open(local):
+    """Is the forex and metals day on? Sunday 17:00 to Friday 17:00 New York, less the two fixed holidays."""
+    wd, t = local.weekday(), local.time()
+    if wd == 5 or (wd == 6 and t < datetime.time(17, 0)) or (wd == 4 and t >= datetime.time(17, 0)):
+        return False
+    return local.strftime("%m-%d") not in FX_CLOSED
+
+
 # ---------------------------------------------------------------- time
 
 def _nth_sunday(year, month, n):
@@ -198,7 +245,7 @@ def stooq_url(sym):
 
 
 def yahoo_url(sym, host=YAHOO_HOSTS[0]):
-    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, sym.upper().replace(".", "-"))
+    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, instrument(sym)["yahoo"])
 
 
 def parse_stooq(text, sym):
@@ -314,15 +361,17 @@ def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
     """{SYM: quote} and [errors]. One request per ticker, with a pause between."""
     quotes, errors = {}, []
     for i, sym in enumerate(symbols):
-        sym = sym.upper()
+        inst = instrument(sym)
+        sym = inst["symbol"]
+        src = source if inst["market"] == "stock" else "yahoo"      # Stooq's .us quotes are stocks only
         try:
             if offline:
-                text = _offline_text(offline, source, sym)
+                text = _offline_text(offline, src, sym)
             else:
                 if i and pause:
                     _sleep(pause)
-                text = fetch(stooq_url(sym)) if source == "stooq" else fetch_yahoo(sym)
-            quotes[sym] = parse_stooq(text, sym) if source == "stooq" else parse_yahoo(text, sym)
+                text = fetch(stooq_url(sym)) if src == "stooq" else fetch_yahoo(sym)
+            quotes[sym] = parse_stooq(text, sym) if src == "stooq" else parse_yahoo(text, sym)
         except AlertError as e:
             errors.append(str(e))
     return quotes, errors
@@ -438,7 +487,10 @@ def evaluate(rules, quotes, status, state, now_utc):
         rid = r.get("id") or "%s-%s" % (r.get("symbol", "market"), r["type"])
         if not active(r, today):
             continue
-        typ = {"stop": "below", "target": "above"}.get(r["type"], r["type"])
+        typ = r["type"]
+        if typ in ("stop", "target"):       # a long's stop is below and its target above; a short's are mirrored
+            typ = "below" if (typ == "stop") != (r.get("side") == "sell") else "above"
+        inst = instrument(r.get("symbol") or "")
         if typ == "opening_bell":
             if status["open"] and not _rang_today(rung.get(rid), today):
                 rings.append({"id": rid, "symbol": "", "message": "Opening bell: the NYSE is open (%s New York)%s."
@@ -448,6 +500,17 @@ def evaluate(rules, quotes, status, state, now_utc):
             continue
         if typ == "time":
             at = ring_time(r, status)
+            if inst["market"] != "stock":
+                if fx_open(local) and local.time() >= at and not _rang_today(rung.get(rid), today):
+                    label = r.get("label") or "time alert"
+                    sym = inst["symbol"]
+                    rings.append({"id": rid, "symbol": sym, "message": (
+                        "%s%s: it is %s New York (set for %s), the forex day rolls over at 17:00. If %s is still "
+                        "open, close it: trader-broker flatten --symbol %s builds the ticket, then trader-risk "
+                        "and your yes." % (label[:1].upper(), label[1:], local.strftime("%H:%M"),
+                                           at.strftime("%H:%M"), sym, sym))})
+                    rung[rid] = stamp
+                continue
             if status.get("opens") and local.time() >= at and not _rang_today(rung.get(rid), today):
                 label = r.get("label") or "time alert"
                 msg = "%s%s: it is %s New York (set for %s)" % (label[:1].upper(), label[1:],
@@ -461,18 +524,20 @@ def evaluate(rules, quotes, status, state, now_utc):
                 rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = stamp
             continue
-        sym = r["symbol"].upper()
+        sym = inst["symbol"]
         q = quotes.get(sym)
         if not q:
             continue
         p = q["price"]
+        live = status["open"] if inst["market"] == "stock" else fx_open(local)
         if typ in ("above", "below"):
             hit = p >= r["price"] if typ == "above" else p <= r["price"]
             if hit and rid not in rung:
                 word = "at or above" if typ == "above" else "at or below"
                 label = {"stop": "stop", "target": "target"}.get(r["type"], "alert level")
-                rings.append({"id": rid, "symbol": sym, "message": "%s %s $%.2f: %s your %s $%s%s."
-                              % (sym, "is" if status["open"] else "last", p, word, label, _n(r["price"]),
+                rings.append({"id": rid, "symbol": sym, "message": "%s %s %s: %s your %s %s%s."
+                              % (sym, "is" if live else "last", pq(inst, p), word, label,
+                                 "$%s" % _n(r["price"]) if inst["market"] == "stock" else pq(inst, r["price"]),
                                  (" (" + r["note"] + ")") if r.get("note") else "")})
                 rung[rid] = stamp
             elif not hit and rid in rung and r.get("rearm"):
@@ -485,11 +550,18 @@ def evaluate(rules, quotes, status, state, now_utc):
             want = r.get("direction")
             hit = abs(move) >= r["pct"] and (not want or (want == "up") == (move > 0))
             if hit and not _rang_today(rung.get(rid), today):
-                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to $%.2f (from $%.2f)."
-                              % (sym, move, p, float(ref))})
+                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to %s (from %s)."
+                              % (sym, move, pq(inst, p), pq(inst, float(ref)))})
                 rung[rid] = stamp
     state["last_check"] = stamp
     return rings, state
+
+
+def pq(inst, x):
+    """A price for a person: $364.18 for a stock or a metal, 1.11371 for a pair."""
+    if inst["market"] == "forex":
+        return "%.*f" % (inst["decimals"], x)
+    return "$%.*f" % (inst["decimals"], x)
 
 
 def _n(x):
@@ -501,7 +573,10 @@ def rules_from_plan(plan, cfg_flat_by=None):
     """trader/plan.json -> a stop alert, a target alert and a flat-by-close time alert, for the plan's day."""
     if not isinstance(plan, dict) or not plan.get("symbol"):
         raise AlertError("the plan has no symbol (run trader-exit first)")
-    sym = str(plan["symbol"]).upper()
+    inst = instrument(plan["symbol"])
+    stock = inst["market"] == "stock"
+    sym = inst["symbol"] if not stock else str(plan["symbol"]).upper()
+    short = str(plan.get("side") or "buy").lower() == "sell"
     out = []
     for key, typ, word in (("stop", "stop", "plan stop"), ("target", "target", "plan target")):
         v = plan.get(key)
@@ -510,11 +585,18 @@ def rules_from_plan(plan, cfg_flat_by=None):
         label = plan.get("%s_label" % key)
         out.append({"id": "%s-plan-%s" % (sym.lower(), key), "symbol": sym, "type": typ, "price": float(v),
                     "note": word + (": " + label if label else "")})
-    flat = plan.get("flat_by") or cfg_flat_by or "15:55"
+    if short:
+        for r in out:
+            r["side"] = "sell"             # a short's stop rings ABOVE the price, its target below
+    flat = plan.get("flat_by") or (cfg_flat_by if stock else None) or ("15:55" if stock else "16:55")
     if _hhmm(flat) is None:
         raise AlertError("the plan's flat_by %r is not a time like 15:55" % flat)
-    out.append({"id": "%s-flat-by" % sym.lower(), "symbol": sym, "type": "time", "at": flat,
-                "label": "flat by close", "before_close": True})
+    if stock:
+        out.append({"id": "%s-flat-by" % sym.lower(), "symbol": sym, "type": "time", "at": flat,
+                    "label": "flat by close", "before_close": True})
+    else:
+        out.append({"id": "%s-flat-by" % sym.lower(), "symbol": sym, "type": "time", "at": flat,
+                    "label": "flat by %s" % flat})
     if plan.get("date"):
         for r in out:
             r["date"] = str(plan["date"])
@@ -560,7 +642,7 @@ def cmd_clock(a):
 
 
 def cmd_quote(a):
-    syms = _dedupe([s.upper() for s in a.symbols] + (holdings(a) if a.holdings else []))
+    syms = _dedupe([instrument(s)["symbol"] for s in a.symbols] + (holdings(a) if a.holdings else []))
     if not syms:
         raise AlertError("which tickers? alerts.py quote TSLA KO, or --holdings")
     now = parse_now(a.now)
@@ -575,8 +657,9 @@ def cmd_quote(a):
             if q:
                 chg = ""
                 if q.get("prev_close"):
-                    chg = " (%+.2f%% vs prev close $%.2f)" % (100.0 * (q["price"] / q["prev_close"] - 1), q["prev_close"])
-                print("%-6s $%.2f%s  %s  [%s]" % (s, q["price"], chg, q.get("time", ""), q["source"]))
+                    chg = " (%+.2f%% vs prev close %s)" % (100.0 * (q["price"] / q["prev_close"] - 1),
+                                                           pq(instrument(s), q["prev_close"]))
+                print("%-6s %s%s  %s  [%s]" % (s, pq(instrument(s), q["price"]), chg, q.get("time", ""), q["source"]))
         for e in errors:
             print("error: " + e)
         if a.write and quotes:
@@ -593,7 +676,7 @@ def cmd_check(a):
     now = parse_now(a.now)
     status = market_status(now)
     watched = [r for r in rules if active(r, status["date"])]
-    syms = _dedupe([str(r.get("symbol", "")).upper() for r in watched if r.get("type") not in NO_QUOTE])
+    syms = _dedupe([instrument(r.get("symbol", ""))["symbol"] for r in watched if r.get("type") not in NO_QUOTE])
     quotes, errors = (get_quotes(syms, a.source, a.offline) if syms else ({}, []))
     state = _read(a.state, {})
     rings, state = evaluate(rules, quotes, status, state, now)
@@ -611,7 +694,8 @@ def cmd_check(a):
             print("ALERT " + r["message"])
         if not rings:
             print("Nothing hit. %d rule(s) watched today%s." % (
-                len(watched), (", " + ", ".join("%s $%.2f" % (s, quotes[s]["price"]) for s in syms if s in quotes))
+                len(watched), (", " + ", ".join("%s %s" % (s, pq(instrument(s), quotes[s]["price"]))
+                                                for s in syms if s in quotes))
                 if quotes else ""))
         for e in errors:
             print("error: " + e)

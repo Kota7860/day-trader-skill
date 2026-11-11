@@ -21,6 +21,8 @@ exitp = load("trader-exit", "exit")
 size = load("trader-budget", "size")
 check = load("trader-risk", "check")
 ticket = load("trader-broker", "ticket")
+alerts = load("trader-alerts", "alerts")
+tm = load("trader-timemachine", "timemachine")
 MK = os.path.join(FIX, "trader-markets")
 EUR = os.path.join(MK, "EURUSD=X-5d5m.json.gz")
 JPY = os.path.join(MK, "USDJPY=X-5d5m.json.gz")
@@ -613,6 +615,61 @@ class Chain(unittest.TestCase):
                                      "--config", f("config.json"), "--now", "2026-11-09 16:55"])
         self.assertEqual(code, 0)
         self.assertIn("SELL 3,347 units of EURUSD", text)
+
+
+class Alerts(unittest.TestCase):
+    def ring(self, rules, quotes, now):
+        utc = alerts.parse_now(now)
+        return alerts.evaluate(rules, quotes, alerts.market_status(utc), {}, utc)[0]
+
+    def test_a_long_plan_rings_below_the_stop_and_above_the_target(self):
+        rules = alerts.rules_from_plan(EUR_PLAN)
+        self.assertEqual([(r["id"], r["type"]) for r in rules],
+                         [("eurusd-plan-stop", "stop"), ("eurusd-plan-target", "target"), ("eurusd-flat-by", "time")])
+        self.assertEqual(rules[2]["at"], "16:55")
+        hit = self.ring(rules, {"EURUSD": {"price": 1.1197}}, "2026-11-09 10:00")
+        self.assertEqual([r["id"] for r in hit], ["eurusd-plan-stop"])
+        self.assertIn("EURUSD is 1.11970: at or below your stop 1.11976", hit[0]["message"])
+        hit = self.ring(rules, {"EURUSD": {"price": 1.1209}}, "2026-11-09 10:00")
+        self.assertEqual([r["id"] for r in hit], ["eurusd-plan-target"])
+
+    def test_a_short_plan_is_mirrored(self):
+        rules = alerts.rules_from_plan(GOLD_SHORT)
+        hit = self.ring(rules, {"XAUUSD": {"price": 4080.0}}, "2026-11-10 10:00")
+        self.assertEqual([r["id"] for r in hit], ["xauusd-plan-stop"])
+        self.assertIn("at or above your stop $4075.60", hit[0]["message"])
+        hit = self.ring(rules, {"XAUUSD": {"price": 4020.0}}, "2026-11-10 10:00")
+        self.assertEqual([r["id"] for r in hit], ["xauusd-plan-target"])
+        self.assertEqual(self.ring(rules, {"XAUUSD": {"price": 4050.0}}, "2026-11-10 10:00"), [])
+
+    def test_flat_by_rings_before_the_rollover_even_on_a_stock_holiday(self):
+        plan = dict(EUR_PLAN, date="2026-11-26")                           # Thanksgiving: the NYSE is closed
+        hit = self.ring(alerts.rules_from_plan(plan), {"EURUSD": {"price": 1.1203}}, "2026-11-26 16:56")
+        self.assertEqual([r["id"] for r in hit], ["eurusd-flat-by"])
+        self.assertIn("rolls over at 17:00", hit[0]["message"])
+        self.assertIn("flatten --symbol EURUSD", hit[0]["message"])
+
+    def test_quotes_ask_yahoo_for_the_right_symbol(self):
+        self.assertTrue(alerts.yahoo_url("EUR/USD").endswith("/EURUSD=X?range=1d&interval=1d"))
+        self.assertTrue(alerts.yahoo_url("XAUUSD").endswith("/GC=F?range=1d&interval=1d"))
+        self.assertTrue(alerts.yahoo_url("BRK.B").endswith("/BRK-B?range=1d&interval=1d"))
+
+    def test_the_forex_week(self):
+        f = lambda text: alerts.fx_open(alerts.to_eastern(alerts.parse_now(text)))
+        self.assertTrue(f("2026-11-09 03:00"))
+        self.assertFalse(f("2026-11-07 12:00"))      # Saturday
+        self.assertFalse(f("2026-11-08 16:00"))      # Sunday before the 17:00 open
+        self.assertTrue(f("2026-11-08 17:30"))
+        self.assertFalse(f("2026-11-13 17:30"))      # Friday after the close
+
+
+class TimeMachine(unittest.TestCase):
+    def test_it_says_plainly_that_it_cannot_replay_forex_or_metals(self):
+        for plan in (EUR_PLAN, GOLD_SHORT, {"symbol": "EUR/USD", "date": "2026-11-09", "entry": 1.1, "stop": 1.0,
+                                           "target": 1.2}):
+            with self.assertRaises(tm.TMError) as cm:
+                tm.normalize_plan(dict(plan))
+            self.assertIn("NYSE sessions only", str(cm.exception))
 
 
 class Defaults(unittest.TestCase):

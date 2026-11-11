@@ -8,7 +8,10 @@ description: >-
   writes ONE bracket order (entry, stop-loss, take-profit) to
   trader/orders.json in the exact shape of Alpaca's place_stock_order. A stop
   too far away for your max loss is a plain refusal, not a smaller order.
-  Nothing is placed. Use when the user says "how many shares", "size this
+  Forex pairs and gold or silver are sized in units and ounces instead,
+  with the risk in pips, the loss converted to dollars, and leverage only
+  if the config turns it on. Nothing is placed. Use when the user says
+  "how many shares", "how many lots", "how many units", "size this
   trade", "how much should I buy", "I have $5,000", "I only want to risk $50
   a trade", "set my rules", "keep 10% in cash", or after /trader-exit writes
   a plan.
@@ -153,6 +156,50 @@ a separate config (`--config`) for a long-term split.
 It never places, approves or schedules an order, never raises a limit on its
 own, never shrinks a stop to fit more shares, and never sizes options,
 margin or short positions.
+
+## Forex and metals
+
+When the plan's symbol is a pair or a metal, `size.py` sizes it in UNITS: one
+unit is one of the base currency (1 unit of EURUSD is 1 euro), or one troy
+ounce of gold or silver. 100,000 units is one standard lot.
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/size.py" --write                 # trader/plan.json, units and pips
+python3 "${CLAUDE_SKILL_DIR}/size.py" --quote-usd 1.34        # a cross like EUR/GBP: the GBPUSD rate
+```
+
+The same four limits apply, and the smallest wins:
+
+    units = floor of the smallest of
+      max loss       max_loss_per_trade_usd / dollars risked per unit
+      position cap   budget x max_position_pct x leverage / dollars per unit
+      max order      max_order_usd x leverage / dollars per unit
+      cash           (budget minus the cash buffer) x leverage / dollars per unit
+
+- **Leverage is off by default.** With `"allow_margin": false` leverage is 1,
+  so a position can be no bigger than the cash. On a $5,000 account that is
+  about 3,300 units of EUR/USD, and a 5-pip stop then risks under $2. That is
+  the honest result of trading forex unleveraged, not a bug: say so.
+- **With `"allow_margin": true`**, `max_leverage` (top level, or inside
+  `"markets": {"forex": {...}}`) multiplies the three size limits. It
+  defaults to 10 and is refused above 50 for forex or 20 for metals, the US
+  retail caps. **It never raises the max loss per trade.** Only turn margin
+  on when the user asks for it in their own words, and tell them a leveraged
+  position can lose more than its margin in a gap.
+- **Dollars.** A dollar-quoted pair or metal needs no conversion. A
+  dollar-base pair (USD/JPY) converts at its own price. A cross (EUR/GBP)
+  needs the quote currency's dollar rate: `--quote-usd`, or `"GBPUSD"` in
+  `trader/prices.json`. Without it the trade is refused, never guessed.
+- **`unit_step`** in the market's config block rounds down to a broker's
+  minimum step, for example 1000 for a broker that only takes micro lots.
+- **Shorts** are sized only with `"allow_short": true`.
+- One ounce of gold is worth about $4,000. On a small account without
+  leverage the position cap or the max order usually refuses it. Report the
+  refusal as written; do not suggest raising limits unless the user asks.
+
+The order uses the same field names (`qty` is units, prices are strings at the
+market's decimals) plus `"market"`, and its `plan` carries `quote_usd`,
+`notional_usd`, `leverage` and `margin_usd` for trader-risk and trader-broker.
 
 ## Safety
 

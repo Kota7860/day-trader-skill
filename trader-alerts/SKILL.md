@@ -9,7 +9,8 @@ description: >-
   with the 2026 and 2027 holidays and 1:00 p.m. early closes, works out New
   York time itself, fetches free delayed quotes (Yahoo chart JSON, Stooq
   CSV) one ticker at a time, and writes trader/prices.json for sizing and the
-  risk check. Use when the user says "alert me when", "tell me if TSLA hits",
+  risk check. Also quotes and watches forex pairs and gold or silver, with
+  a short's stop ringing above the price. Use when the user says "alert me when", "tell me if TSLA hits",
   "watch my stop", "watch my trade", "remind me to close by 3:55", "is the
   market open", "when does the market open", "get me a price", or right
   after /trader-exit writes a plan.
@@ -147,6 +148,27 @@ watched; with `add --opening-bell`, the bell rings at 9:30.
 
 It never places, cancels or changes an order, never claims a quote is
 live, and never predicts where a price is going.
+
+## Forex and metals
+
+`quote`, `add --from-plan` and `check` take pairs and metals too:
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote EUR/USD USDJPY XAUUSD --write
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --from-plan       # stop, target, flat-by from a forex plan
+```
+
+- Quotes come from Yahoo only (`EURUSD=X`; gold and silver are the COMEX
+  futures `GC=F` and `SI=F`, about 10 minutes delayed). Stooq is not used.
+- A long plan's stop rings at or below its price and its target at or above.
+  **A short plan is mirrored:** the stop rings at or ABOVE, the target at or
+  below.
+- The flat-by alert rings at the plan's flat-by (16:55 New York by default),
+  on any day the forex market trades, including NYSE holidays. It tells the
+  user the forex day rolls over at 17:00.
+- `status` and the opening bell are still about the NYSE only.
+- A stop-loss attached at the broker is what protects the trade. An alert on
+  a delayed futures price is a reminder, not protection.
 
 ## Safety
 

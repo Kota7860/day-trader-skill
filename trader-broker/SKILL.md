@@ -8,7 +8,9 @@ description: >-
   for word, then Claude's own Allow once / Deny card asks again. Builds the
   sell ticket that closes a day trade by your flat-by time, records fills,
   and logs each trade's max loss so trader-risk can hold the daily limit.
-  Covers setting up Alpaca's official MCP server in Claude Desktop (paper by
+  Forex and metals tickets show units and pips, the order as an OANDA v20
+  body, and distances instead of futures prices for gold and silver. Covers
+  setting up Alpaca's official MCP server in Claude Desktop (paper by
   default, keys in env vars, never in chat), the Interactive Brokers
   connector, and setting order tools to "Needs approval". Use when the user
   says "place the order", "buy it", "execute", "send it to my broker",
@@ -199,6 +201,48 @@ buttons: Allow once, Deny. Allow once sends it to the paper account. The
 - Never switches `ALPACA_PAPER_TRADE` or `"paper"` to live. The user does that themselves.
 - Never calls `close_all_positions`, `cancel_all_orders`, option or crypto order tools on its own.
 - Never promises a fill price: a market order and a stop fill at whatever the market gives.
+
+## Forex and metals
+
+Alpaca does not trade forex or spot metals, so these orders go to a forex
+broker. The pack assumes OANDA by default (`"markets": {"forex": {"broker":
+"oanda"}}`). The three gates do not change: trader-risk passed this exact
+order today, the user typed yes for this one order, and any connector's order
+tool is set to "Needs approval".
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" show                                    # units, pips, the OANDA body
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" approve --index 1 --reply "yes"
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --status placed --filled-qty 3347 --filled-price 1.12021
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol EURUSD --side sell --qty 3347 --price 1.12086
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" flatten --symbol EURUSD
+```
+
+- **The forex ticket** shows the order in units, the stop and target with
+  their pips, the position's value, the margin if leverage is on, and the
+  max loss in dollars. Under it is the order as OANDA's v20 API takes it
+  (`POST /v3/accounts/{accountID}/orders`): signed units (negative sells), the
+  stop-loss and take-profit attached to the fill.
+- **How it gets placed.** This pack has not verified any OANDA connector.
+  If the user has a brokerage connector that takes a v20 order and it is set
+  to "Needs approval", send exactly the body shown after their yes. If not,
+  the user enters the same order by hand in the broker's platform. Never
+  call a raw HTTP API with the user's keys yourself. Either way, record what
+  happened with `result`.
+- **The metals ticket has no order body.** Its levels come from COMEX
+  futures. Read the user the distances it prints ("stop $23.40 above your
+  fill") and have them set the stop and target on the broker's own price.
+- **A sell that opens a position is a short.** The ticket says THIS IS A
+  SHORT. Read that line to the user before asking for the yes.
+- **Fills are margin positions.** `fill` and `result --filled-qty` keep a
+  signed position (negative is short) with its average price under
+  `margin_positions` in `trader/portfolio.json`. Cash does not move when a
+  position opens. When a fill closes it, only the profit or loss is added to
+  cash, in dollars. Closing a cross needs `--quote-usd`.
+- **`flatten`** builds the closing ticket in the right direction: a sell for
+  a long, a buy for a short (`--qty N --side buy` if the position is not in
+  the portfolio file). Do it before 16:55 New York.
+- Paper first here too: OANDA's practice account is separate from live.
 
 ## Safety
 

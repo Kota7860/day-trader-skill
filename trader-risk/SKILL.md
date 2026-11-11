@@ -9,7 +9,9 @@ description: >-
   more than your trades per day, and no new entries outside your entry
   window or when the market is closed. It also keeps the basics: blocked
   tickers, order size, position cap, cash buffer, margin, short sales,
-  options and crypto, malformed or bad bracket orders, duplicates and a daily
+  options and crypto, forex and metals orders (units, pips, the session
+  window, leverage and shorts only if the config allows them), malformed or
+  bad bracket orders, duplicates and a daily
   order limit. Getting out is never blocked by a day limit. Prints PASS or
   BLOCK with the reason and records the verdicts so trader-broker only shows
   an order that passed. Use when the user says "check my order", "is this
@@ -159,6 +161,31 @@ it is after the 3:30 entry cutoff: it is an exit.
 It never places an order, never edits an order to make it pass, never
 loosens a limit, never blocks a sell that only gets the user out, and never
 treats a PASS as the user's yes.
+
+## Forex and metals
+
+An order for a pair (`EURUSD`) or a metal (`XAUUSD`, `XAGUSD`) is checked by
+the same rules with these differences:
+
+- **qty is units** (ounces for metals), whole numbers only, no dollar
+  amounts. Market or limit orders only.
+- **The loss is in dollars:** units x the stop distance x the quote
+  currency's dollar rate (from the order's plan). It must fit
+  `max_loss_per_trade_usd` and the daily loss limit, which is shared with
+  stock trades: forex and stock risk add up in one day.
+- **Leverage.** With `"allow_margin": false` the position's full value must
+  fit the cash, the position cap and the max order, exactly like a stock.
+  With it on, those three scale by `max_leverage` (at most 50 forex, 20
+  metals). An order sized with leverage is BLOCKED if margin is off.
+- **Shorts** are blocked unless `"allow_short": true`. A sell that closes a
+  recorded long, or a buy that closes a recorded short, is an exit and is
+  never blocked by day limits.
+- **The window** is the plan's session (New York 8:00 to 17:00, or London),
+  not NYSE hours: blocked on weekends, on December 25 and January 1, outside
+  the session, and in its last 90 minutes (or after the market's
+  `no_entries_after`).
+- **The pattern-day-trader guard** does not count forex or metals trades.
+- A metals PASS carries a note that its levels are COMEX futures prices.
 
 ## Safety
 

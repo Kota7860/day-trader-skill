@@ -7,8 +7,11 @@ description: >-
   that CLOSES above the range high, or above a level you give it (like a
   20-day high from the scanner), with an optional volume check. Says waiting
   and how far, triggered with the time and the price, expired, or not open
-  yet, and writes trader/entry.json for /trader-exit. Long side only. It never
-  places an order. Use when the user says "tell me when to get in", "watch
+  yet, and writes trader/entry.json for /trader-exit. Stocks are long only.
+  Forex pairs (EURUSD, USD/JPY) and gold or silver (XAUUSD, XAGUSD) use the
+  New York or London session's first 30 minutes as the range, and can also
+  trigger a sell on a close below the range low when the config allows
+  shorts. It never places an order. Use when the user says "tell me when to get in", "watch
   TSLA", "has it broken out", "did it break the opening range", "entry
   signal", "time my entry", "check my watchlist", or after /trader-scanner
   and /trader-news, before /trader-exit.
@@ -131,6 +134,44 @@ It never places an order, never sizes a position, never sets the stop (that
 is `/trader-exit`), never moves the level after the fact, and never counts a
 bar that has not closed. It never runs `/trader-broker` from a background
 watch: nobody is there to say yes.
+
+## Forex and metals
+
+The same tool times entries on currency pairs and on gold and silver. Write
+the symbol any usual way: `EURUSD`, `EUR/USD`, `USDJPY`, `XAUUSD` (gold),
+`XAGUSD` (silver).
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/entry.py" check EURUSD                       # New York session, 30-minute range
+python3 "${CLAUDE_SKILL_DIR}/entry.py" check EURUSD --session london      # London session instead
+python3 "${CLAUDE_SKILL_DIR}/entry.py" check XAUUSD --side sell           # a breakdown; needs allow_short
+python3 "${CLAUDE_SKILL_DIR}/entry.py" watch USDJPY --every 30
+```
+
+What is different from a stock:
+
+- **The session is the "open".** These markets trade around the clock on
+  weekdays, so the opening range is the start of a named session: `ny`
+  (8:00 to 17:00 New York, the default) or `london` (8:00 to 16:30 London
+  time, shown in New York time, usually 3:00 to 11:30). Set a default with
+  `"markets": {"forex": {"session": "london"}}` in `trader/config.json`.
+- **The range is 30 minutes by default**, not 15: the first quarter hour of a
+  forex session is too tight. `--or-minutes` changes it.
+- **No new entries in the last 90 minutes of the session** unless the
+  market's `no_entries_after` in the config says otherwise.
+- **Prices keep the market's decimals:** five for most pairs, three for yen
+  pairs and silver, two for gold. Distances are shown in pips for pairs.
+- **Shorts are opt-in.** `--side sell` triggers on a close BELOW the range
+  low. It is refused unless `"allow_short": true` is in the config, and the
+  user must have asked for it. Stocks stay long only either way.
+- **No volume for pairs.** Yahoo's forex bars have none, so `--min-volume-x`
+  is refused for them.
+- **Gold and silver are COMEX futures prices** (`GC=F`, `SI=F`), about 10
+  minutes delayed, because there is no free spot feed. Spot gold at a broker
+  trades a few dollars away. Say this whenever you quote a metals level.
+- Closed on weekends, December 25 and January 1; metals also on Good Friday.
+
+All times shown are New York time. Tell the user that once.
 
 ## Safety
 

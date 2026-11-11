@@ -120,6 +120,63 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
+## Forex, gold and silver
+
+Seven of the skills also work on currency pairs and metals. Write the symbol
+any usual way: `EURUSD`, `EUR/USD`, `USDJPY`, `XAUUSD` (gold), `XAGUSD`
+(silver).
+
+```
+entry -> exit -> budget -> risk -> broker     (one trade)
+alerts: stop, target, flat before the 17:00 New York rollover
+```
+
+An example on real data, EUR/USD on Monday November 9 2026:
+
+1. **`/trader-entry`**: the New York session's first 30 minutes ran 1.11957
+   to 1.11995. The 8:50 bar closed at 1.12020, 2.5 pips over the top:
+   triggered at 8:55 AM.
+2. **`/trader-exit`**: stop at the range midpoint, 1.11976 (4.4 pips);
+   target 1.5 times that risk, 1.12086; flat by 16:55 New York.
+3. **`/trader-budget`** with a $5,000 account and no leverage: 3,347 units
+   (0.03 lots, worth $3,749), bound by the position cap. Max loss at the
+   stop: $1.47.
+4. **`/trader-risk`**: PASS. **`/trader-broker`** shows the ticket in units
+   and pips with the order as an OANDA v20 body, and asks for your yes.
+
+What is different from stocks:
+
+- **Sessions, not the opening bell.** These markets trade around the clock
+  on weekdays, so the opening range is the start of the New York session
+  (8:00 to 17:00 New York) or the London session (`--session london`). All
+  times are New York time.
+- **Units and pips.** Positions are sized in units of the base currency (or
+  ounces of metal), prices keep the market's decimals, and the loss is
+  converted to dollars for yen and cross pairs.
+- **Leverage and shorts are off until you turn them on.** With
+  `"allow_margin": false` a position can be no bigger than your cash, which
+  makes forex trades small: that is the point of the default. With it on,
+  `"max_leverage"` (10 by default, never over 50 for forex or 20 for metals)
+  raises the size limits but never the max loss per trade. `"allow_short":
+  true` lets the entry timer, the planner and the rest handle a sell. Stocks
+  stay long only.
+- **Gold and silver prices are COMEX futures** (`GC=F`, `SI=F`), about 10
+  minutes delayed, because there is no free spot feed. Spot gold at a broker
+  trades a few dollars away, so the metals ticket gives the stop and target
+  as distances from your fill, not as prices to copy.
+- **A different broker.** Alpaca does not trade forex or spot metals. The
+  ticket is written for OANDA. This pack has not verified an OANDA connector
+  for Claude, so without one you enter the order by hand in your broker's
+  platform, after the same risk check and the same yes.
+
+Not covered yet: the Chart Scanner scans US stocks only, the Time Machine
+replays NYSE sessions only and refuses a forex or metals plan, the News
+Monitor has no economic calendar, and the Earnings Analyst and Pelosi Tracker
+are about stocks by nature. Crypto is not supported.
+
+Leveraged forex and metals trading can lose more than the margin you put up,
+and most retail accounts lose money at it. Paper trade first.
+
 ## The tools
 
 All standard-library Python. The data tools read public endpoints and are
@@ -141,6 +198,9 @@ python3 trader-alerts/alerts.py add --from-plan                        # stop, t
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
 python3 trader-analyst/facts.py TSLA                                   # quarters, growth, EPS
 python3 trader-pelosi/ptr.py index --member pelosi                     # her PTRs this year
+python3 trader-entry/entry.py check EURUSD --session london            # a forex pair, London session
+python3 trader-exit/exit.py plan --stop pips:10 --target 2R --write    # a stop in pips
+python3 trader-alerts/alerts.py quote EUR/USD XAUUSD                   # forex and gold quotes
 ```
 
 ```bash
@@ -150,7 +210,9 @@ python3 -m unittest discover -s tests -v
 The tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
 for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
-real XBRL facts. They reproduce every number in the example above.
+real XBRL facts. They reproduce every number in the example above. The forex
+and metals tests run on Yahoo's 5-minute bars for EUR/USD, USD/JPY, EUR/GBP
+and gold futures for the five days to November 11 2026.
 
 ## Fine print
 

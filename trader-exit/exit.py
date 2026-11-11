@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Exit Planner for trader-exit: sets the stop and the target BEFORE you
-enter, so you know when to get out. Standard library only. Long side only.
-It never places an order.
+enter, so you know when to get out. Standard library only. Stocks are long
+only. It never places an order.
+
+Forex pairs and metals (EURUSD, XAUUSD ...) plan to the market's tick, take a
+pips:N stop, go flat by 16:55 New York at the latest (before the 17:00
+rollover), and plan a short (stop above, target below) when "allow_short" is
+true in the config.
 
     python3 exit.py plan                                    # from trader/entry.json: or-mid stop, 2R target
     python3 exit.py plan --stop or-mid --target 1R --write  # the reel: stop 358.32, target 370.04

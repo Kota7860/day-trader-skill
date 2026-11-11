@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """Entry Timer for trader-entry: watches a setup bar by bar and says the
-moment to get in. Standard library only. Long side only. It never places an order.
+moment to get in. Standard library only. Stocks are long only. It never places an order.
+
+Forex pairs (EURUSD, EUR/USD) and metals (XAUUSD gold, XAGUSD silver) work too:
+the range is the first 30 minutes of the New York session (8:00 to 17:00 New
+York) or of --session london, prices keep the market's decimals, and --side sell
+watches for a close BELOW the range low when "allow_short" is true in the
+config. Gold and silver read COMEX futures (GC=F, SI=F), about 10 minutes delayed.
+
+    python3 entry.py check EURUSD --session london
+    python3 entry.py check XAUUSD --side sell
 
     python3 entry.py check TSLA                          # opening-range breakout, 5-minute bars
     python3 entry.py check TSLA --now "2026-10-19 10:15" --offline TSLA.json
