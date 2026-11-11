@@ -18,6 +18,9 @@ from _load import FIX, load
 
 entry = load("trader-entry", "entry")
 exitp = load("trader-exit", "exit")
+size = load("trader-budget", "size")
+check = load("trader-risk", "check")
+ticket = load("trader-broker", "ticket")
 MK = os.path.join(FIX, "trader-markets")
 EUR = os.path.join(MK, "EURUSD=X-5d5m.json.gz")
 JPY = os.path.join(MK, "USDJPY=X-5d5m.json.gz")
@@ -54,9 +57,11 @@ class Instruments(unittest.TestCase):
             self.assertEqual(entry.instrument(text)["market"], "stock", text)
         self.assertEqual(entry.instrument("BRK.B")["yahoo"], "BRK-B")
 
-    def test_both_tools_agree(self):
-        for text in ("EURUSD", "USDJPY", "XAUUSD", "XAGUSD", "TSLA"):
-            self.assertEqual(entry.instrument(text), exitp.instrument(text), text)
+    def test_every_tool_agrees(self):
+        for text in ("EURUSD", "USD/JPY", "XAUUSD", "XAGUSD", "TSLA", "BRK.B"):
+            want = entry.instrument(text)
+            for mod in (exitp, size, check, ticket):
+                self.assertEqual(mod.instrument(text), want, "%s in %s" % (text, mod.__name__))
 
 
 class Sessions(unittest.TestCase):
@@ -326,6 +331,298 @@ class ExitCommand(unittest.TestCase):
                                    "--stop", "pct:1", "--config", self.cfg])
         self.assertEqual(code, 1)
         self.assertIn("longs only", err)
+
+
+EUR_PLAN = {"symbol": "EURUSD", "side": "buy", "date": "2026-11-09", "setup": "orb", "entry": 1.1202,
+            "entry_time": "8:55 AM", "stop": 1.11976, "target": 1.12086, "flat_by": "16:55",
+            "market": "forex", "session": "ny"}
+GOLD_SHORT = {"symbol": "XAUUSD", "side": "sell", "date": "2026-11-10", "setup": "orb", "entry": 4052.2,
+              "entry_time": "8:35 AM", "stop": 4075.6, "target": 4028.8, "flat_by": "16:55",
+              "market": "metal", "session": "ny"}
+CFG = {"budget": 5000}
+GCFG = {"budget": 10000, "max_order_usd": 8000, "allow_short": True}   # one ounce of gold is about $4,050
+LEV = {"budget": 5000, "allow_margin": True, "allow_short": True, "markets": {"forex": {"max_leverage": 20}}}
+
+
+class Sizing(unittest.TestCase):
+    def test_without_leverage_the_position_cap_binds(self):
+        s = size.size_market_trade(EUR_PLAN, CFG, today="2026-11-09")
+        self.assertEqual((s["qty"], s["bound_by"], s["leverage"]), (3347, "position cap", 1.0))
+        self.assertEqual((s["cost"], s["max_loss"], s["risk_pips"]), (3749.31, 1.47, 4.4))
+        self.assertIsNone(s["refusal"])
+
+    def test_leverage_raises_the_size_but_never_the_max_loss(self):
+        s = size.size_market_trade(EUR_PLAN, LEV, today="2026-11-09")
+        self.assertEqual((s["qty"], s["leverage"]), (66952, 20.0))
+        self.assertEqual((s["cost"], s["margin"], s["max_loss"]), (74999.63, 3749.98, 29.46))
+        wide = dict(EUR_PLAN, stop=1.1152, target=1.1302)             # 50 pips: now the max loss binds
+        s = size.size_market_trade(wide, LEV, today="2026-11-09")
+        self.assertEqual((s["qty"], s["bound_by"], s["max_loss"]), (10000, "max loss", 50.0))
+
+    def test_leverage_over_the_retail_cap_is_refused(self):
+        with self.assertRaises(size.SizeError):
+            size.size_market_trade(EUR_PLAN, dict(LEV, markets={"forex": {"max_leverage": 100}}), today="2026-11-09")
+
+    def test_micro_lot_step(self):
+        cfg = dict(LEV, markets={"forex": {"max_leverage": 20, "unit_step": 1000}})
+        self.assertEqual(size.size_market_trade(EUR_PLAN, cfg, today="2026-11-09")["qty"], 66000)
+
+    def test_a_dollar_base_pair_converts_the_loss_at_its_own_price(self):
+        plan = {"symbol": "USDJPY", "side": "buy", "date": "2026-11-10", "entry": 158.38, "stop": 158.23,
+                "target": 158.68}
+        s = size.size_market_trade(plan, LEV, today="2026-11-10")
+        self.assertAlmostEqual(s["quote_usd"], 1 / 158.23, places=8)
+        self.assertAlmostEqual(s["unit_usd"], 158.38 / 158.23, places=5)
+        self.assertEqual(s["max_loss"], round(s["qty"] * 0.15 / 158.23, 2))
+        self.assertLessEqual(s["max_loss"], 50.0)
+
+    def test_a_cross_needs_the_quote_currency_rate(self):
+        plan = {"symbol": "EURGBP", "side": "buy", "date": "2026-11-10", "entry": 0.83565, "stop": 0.83465,
+                "target": 0.83765}
+        with self.assertRaises(size.SizeError) as cm:
+            size.size_market_trade(plan, LEV, today="2026-11-10")
+        self.assertIn("GBPUSD", str(cm.exception))
+        s = size.size_market_trade(plan, LEV, today="2026-11-10", quote_usd=1.34)
+        self.assertEqual(s["qty"], 37313)                                  # $50 / (0.00100 x 1.34)
+        s2 = size.size_market_trade(plan, LEV, today="2026-11-10", prices={"GBPUSD": 1.34})
+        self.assertEqual(s2["qty"], s["qty"])
+
+    def test_a_short_needs_allow_short(self):
+        with self.assertRaises(size.SizeError):
+            size.size_market_trade(GOLD_SHORT, {"budget": 10000}, today="2026-11-10")
+        s = size.size_market_trade(GOLD_SHORT, GCFG, today="2026-11-10")
+        self.assertEqual((s["qty"], s["side"], s["max_loss"], s["cost"]), (1, "sell", 23.4, 4052.2))
+
+    def test_an_ounce_of_gold_does_not_fit_a_small_account_without_leverage(self):
+        s = size.size_market_trade(GOLD_SHORT, dict(CFG, allow_short=True), today="2026-11-10")
+        self.assertEqual((s["qty"], s["bound_by"]), (0, "position cap"))
+        self.assertIn("1 ounce of XAUUSD is worth $4,052.20", s["refusal"])
+
+    def test_gold_stop_too_wide_for_the_max_loss_is_refused(self):
+        s = size.size_market_trade(dict(GOLD_SHORT, stop=4110.0, target=3990.0),
+                                   GCFG, today="2026-11-10")
+        self.assertEqual(s["qty"], 0)
+        self.assertIn("more than your $50 max loss", s["refusal"])
+        self.assertIsNone(size.market_order(s))
+
+    def test_the_order_keeps_broker_precision(self):
+        o = size.market_order(size.size_market_trade(EUR_PLAN, CFG, today="2026-11-09"))
+        self.assertEqual((o["qty"], o["stop_loss_stop_price"], o["take_profit_limit_price"], o["market"]),
+                         ("3347", "1.11976", "1.12086", "forex"))
+        self.assertEqual(o["plan"]["quote_usd"], 1.0)
+
+    def test_a_stale_plan_date_is_refused(self):
+        with self.assertRaises(size.SizeError):
+            size.size_market_trade(EUR_PLAN, CFG, today="2026-11-10")
+
+
+def order_for(plan, cfg, today):
+    return size.market_order(size.size_market_trade(plan, cfg, today=today))
+
+
+class Risk(unittest.TestCase):
+    NOW = check.parse_now("2026-11-09 08:56")
+
+    def one(self, order, cfg, now=None, **kw):
+        return check.check([order], cfg, now=now or self.NOW, **kw)["results"][0]
+
+    def test_a_sized_order_passes(self):
+        r = self.one(order_for(EUR_PLAN, CFG, "2026-11-09"), CFG)
+        self.assertEqual((r["verdict"], r["kind"], r["market"], r["max_loss"], r["reward_risk"]),
+                         ("PASS", "entry", "forex", 1.47, 1.5))
+
+    def test_a_leveraged_order_is_blocked_when_margin_is_off(self):
+        r = self.one(order_for(EUR_PLAN, LEV, "2026-11-09"), CFG)
+        self.assertEqual(r["verdict"], "BLOCK")
+        text = " ".join(r["reasons"])
+        self.assertIn("leverage is off", text)
+        self.assertIn("max order", text)
+        self.assertEqual(self.one(order_for(EUR_PLAN, LEV, "2026-11-09"), LEV)["verdict"], "PASS")
+
+    def test_the_weekend_and_the_late_session_are_blocked(self):
+        o = order_for(EUR_PLAN, CFG, "2026-11-09")
+        r = self.one(o, CFG, now=check.parse_now("2026-11-07 10:00"))
+        self.assertIn("forex market is closed today", " ".join(r["reasons"]))
+        r = self.one(o, CFG, now=check.parse_now("2026-11-09 16:10"))
+        self.assertIn("no new forex entries after 15:30", " ".join(r["reasons"]))
+        r = self.one(o, CFG, now=check.parse_now("2026-11-09 06:00"))
+        self.assertIn("outside the New York session", " ".join(r["reasons"]))
+
+    def test_a_london_plan_is_checked_against_the_london_session(self):
+        o = order_for(dict(EUR_PLAN, session="london"), CFG, "2026-11-09")
+        self.assertEqual(self.one(o, CFG, now=check.parse_now("2026-11-09 04:00"))["verdict"], "PASS")
+        r = self.one(o, CFG, now=check.parse_now("2026-11-09 11:45"))
+        self.assertIn("outside the London session", " ".join(r["reasons"]))
+
+    def test_a_short_is_blocked_unless_turned_on(self):
+        on = GCFG
+        o = order_for(GOLD_SHORT, on, "2026-11-10")
+        now = check.parse_now("2026-11-10 08:36")
+        r = self.one(o, {"budget": 10000, "max_order_usd": 8000}, now=now)
+        self.assertEqual(r["verdict"], "BLOCK")
+        self.assertIn("short selling is off", " ".join(r["reasons"]))
+        r = self.one(o, on, now=now)
+        self.assertEqual((r["verdict"], r["max_loss"]), ("PASS", 23.4))
+        self.assertIn("COMEX gold futures", " ".join(r["warnings"]))
+
+    def test_too_many_units_for_the_max_loss_is_blocked(self):
+        o = dict(order_for(dict(EUR_PLAN, stop=1.1152, target=1.1302), LEV, "2026-11-09"), qty="20000")
+        r = self.one(o, LEV)
+        self.assertEqual(r["verdict"], "BLOCK")
+        self.assertIn("over your $50 max loss", " ".join(r["reasons"]))
+
+    def test_no_stop_is_blocked(self):
+        o = order_for(EUR_PLAN, CFG, "2026-11-09")
+        del o["stop_loss_stop_price"]
+        o["plan"] = dict(o["plan"], stop=None)
+        self.assertIn("stop: no stop", " ".join(self.one(o, CFG)["reasons"]))
+
+    def test_closing_a_recorded_position_is_an_exit_and_never_blocked(self):
+        pf = {"cash": 5000, "positions": [], "margin_positions": [{"symbol": "EURUSD", "units": 3347, "avg_price": 1.1202}]}
+        o = {"symbol": "EURUSD", "side": "sell", "qty": "3347", "type": "market", "time_in_force": "day"}
+        r = self.one(o, CFG, now=check.parse_now("2026-11-09 16:55"), portfolio=pf)
+        self.assertEqual((r["verdict"], r["kind"]), ("PASS", "exit"))
+
+    def test_the_daily_loss_limit_counts_forex_and_stocks_together(self):
+        state = {"orders": [{"status": "placed", "date": "2026-11-09", "symbol": "TSLA", "side": "buy",
+                             "kind": "entry", "max_loss": 120.0}]}
+        o = order_for(dict(EUR_PLAN, stop=1.1152, target=1.1302), LEV, "2026-11-09")     # max loss $50
+        r = self.one(o, LEV, state=state)
+        self.assertIn("daily loss", " ".join(r["reasons"]))
+
+    def test_stock_orders_are_untouched(self):
+        o = {"symbol": "TSLA", "side": "buy", "qty": "8", "type": "market", "time_in_force": "day",
+             "order_class": "bracket", "take_profit_limit_price": "370.04", "stop_loss_stop_price": "358.32",
+             "plan": {"entry": 364.18, "stop": 358.32, "target": 370.04}}
+        r = check.check([o], CFG, now=check.parse_now("2026-10-19 10:15"))["results"][0]
+        self.assertEqual((r["verdict"], r["max_loss"]), ("PASS", 46.88))
+        self.assertNotIn("market", r)
+
+
+class Ticket(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.pf = os.path.join(self.tmp, "portfolio.json")
+
+    def test_plain_ticket_and_the_oanda_order(self):
+        o = order_for(EUR_PLAN, LEV, "2026-11-09")
+        text = ticket.plain(o)
+        self.assertIn("BUY 66,952 units of EURUSD (EUR/USD), market", text)
+        self.assertIn("stop-loss 1.11976 (4.4 pips)", text)
+        self.assertIn("max loss about $29.46", text)
+        self.assertEqual(ticket.oanda_body(o), {"order": {
+            "type": "MARKET", "instrument": "EUR_USD", "units": "66952", "timeInForce": "FOK",
+            "positionFill": "DEFAULT", "stopLossOnFill": {"price": "1.11976", "timeInForce": "GTC"},
+            "takeProfitOnFill": {"price": "1.12086", "timeInForce": "GTC"}}})
+
+    def test_a_sell_has_negative_units(self):
+        plan = dict(EUR_PLAN, side="sell", entry=1.11857, stop=1.12152, target=1.11562, date="2026-11-10")
+        o = order_for(plan, LEV, "2026-11-10")
+        self.assertTrue(ticket.oanda_body(o)["order"]["units"].startswith("-"))
+
+    def test_fingerprint_matches_the_risk_check(self):
+        o = order_for(EUR_PLAN, CFG, "2026-11-09")
+        self.assertEqual(ticket.fingerprint(o), check.fingerprint(o))
+
+    def test_a_metal_ticket_gives_distances_not_futures_prices(self):
+        o = order_for(GOLD_SHORT, GCFG, "2026-11-10")
+        text = "\n".join(ticket.market_how(o, GCFG))
+        self.assertIn("stop $23.40 above your fill", text)
+        self.assertIn("take-profit $23.40 below your fill", text)
+        self.assertNotIn("POST /v3", text)
+
+    def test_yes_rules_still_hold(self):
+        o = order_for(EUR_PLAN, CFG, "2026-11-09")
+        self.assertTrue(ticket.parse_yes("yes", o)[0])
+        self.assertTrue(ticket.parse_yes("yes, 3347 EURUSD", o)[0])
+        self.assertFalse(ticket.parse_yes("yes to all", o)[0])
+        self.assertFalse(ticket.parse_yes("yes 5000", o)[0])
+        self.assertFalse(ticket.parse_yes("ok", o)[0])
+
+    def test_a_round_trip_books_only_the_profit(self):
+        cfg = {"budget": 5000}
+        pf, pnl = ticket.apply_market_fill(self.pf, cfg, "EURUSD", "buy", 66952, 1.12022, "2026-11-09")
+        self.assertIsNone(pnl)
+        self.assertEqual(pf["cash"], 5000.0)                               # margin product: cash is not spent
+        self.assertEqual(pf["margin_positions"][0]["units"], 66952.0)
+        pf, pnl = ticket.apply_market_fill(self.pf, cfg, "EURUSD", "sell", 66952, 1.12086, "2026-11-09")
+        self.assertEqual((pnl, pf["cash"]), (42.85, 5042.85))
+        self.assertNotIn("margin_positions", pf)
+
+    def test_a_short_round_trip_and_a_yen_conversion(self):
+        cfg = {"budget": 5000}
+        ticket.apply_market_fill(self.pf, cfg, "USDJPY", "sell", 10000, 158.38, "2026-11-10")
+        with open(self.pf) as fh:
+            self.assertEqual(json.load(fh)["margin_positions"][0]["units"], -10000.0)
+        pf, pnl = ticket.apply_market_fill(self.pf, cfg, "USDJPY", "buy", 10000, 158.68, "2026-11-10")
+        self.assertEqual(pnl, round(10000 * -0.30 / 158.68, 2))            # a short loses when the price rises
+        self.assertEqual(pf["cash"], round(5000 + pnl, 2))
+
+    def test_a_cross_needs_the_rate_to_book_a_close(self):
+        cfg = {"budget": 5000}
+        ticket.apply_market_fill(self.pf, cfg, "EURGBP", "buy", 1000, 0.8356, "2026-11-10")
+        with self.assertRaises(ticket.TicketError):
+            ticket.apply_market_fill(self.pf, cfg, "EURGBP", "sell", 1000, 0.8366, "2026-11-10")
+        pf, pnl = ticket.apply_market_fill(self.pf, cfg, "EURGBP", "sell", 1000, 0.8366, "2026-11-10", 1.34)
+        self.assertEqual(pnl, 1.34)
+
+
+class Chain(unittest.TestCase):
+    """entry -> exit -> budget -> risk -> ticket, through the command lines, on the real EURUSD session."""
+
+    def test_the_whole_order_path(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        f = lambda name: os.path.join(tmp, name)
+        with open(os.path.join(os.path.dirname(FIX), "..", "trader-budget", "config.example.json")) as fh:
+            cfg = json.load(fh)
+        with open(f("config.json"), "w") as fh:
+            json.dump(cfg, fh)
+        code, _, _ = run(entry, ["check", "EURUSD", "--now", "2026-11-09 08:55", "--offline", EUR,
+                                 "--config", f("config.json"), "--write", f("entry.json")])
+        self.assertEqual(code, 0)
+        code, _, _ = run(exitp, ["plan", "--from", f("entry.json"), "--target", "1.5R", "--now", "2026-11-09 08:55",
+                                 "--config", f("config.json"), "--write", f("plan.json")])
+        self.assertEqual(code, 0)
+        code, text, _ = run(size, ["--plan", f("plan.json"), "--config", f("config.json"), "--portfolio", f("pf.json"),
+                                   "--now", "2026-11-09 08:55", "--write", f("orders.json")])
+        self.assertEqual(code, 0)
+        self.assertIn("Size: 3,347 units of EURUSD", text)
+        self.assertIn("No leverage", text)
+        code, text, _ = run(check, ["--orders", f("orders.json"), "--config", f("config.json"),
+                                    "--portfolio", f("pf.json"), "--prices", f("prices.json"),
+                                    "--state", f("broker.json"), "--out", f("risk.json"), "--now", "2026-11-09 08:56"])
+        self.assertEqual(code, 0, text)
+        common = ["--orders", f("orders.json"), "--config", f("config.json"), "--risk", f("risk.json"),
+                  "--state", f("broker.json"), "--now", "2026-11-09 08:57"]
+        code, text, _ = run(ticket, ["show"] + common)
+        self.assertEqual(code, 0)
+        self.assertIn("READY", text)
+        self.assertIn('"instrument": "EUR_USD"', text)
+        self.assertNotIn("place_stock_order", text)
+        code, _, _ = run(ticket, ["approve", "--index", "1", "--reply", "sure"] + common)
+        self.assertEqual(code, 1)
+        code, _, _ = run(ticket, ["approve", "--index", "1", "--reply", "yes"] + common)
+        self.assertEqual(code, 0)
+        code, _, _ = run(ticket, ["result", "--index", "1", "--status", "placed", "--filled-qty", "3347",
+                                  "--filled-price", "1.12021", "--portfolio", f("pf.json")] + common)
+        self.assertEqual(code, 0)
+        code, text, _ = run(ticket, ["flatten", "--symbol", "EURUSD", "--orders", f("orders.json"),
+                                     "--portfolio", f("pf.json"), "--plan", f("plan.json"),
+                                     "--config", f("config.json"), "--now", "2026-11-09 16:55"])
+        self.assertEqual(code, 0)
+        self.assertIn("SELL 3,347 units of EURUSD", text)
+
+
+class Defaults(unittest.TestCase):
+    def test_the_example_config_keeps_leverage_and_shorts_off(self):
+        with open(os.path.join(os.path.dirname(FIX), "..", "trader-budget", "config.example.json")) as fh:
+            cfg = json.load(fh)
+        self.assertIs(cfg["allow_margin"], False)
+        self.assertIs(cfg["allow_short"], False)
+        self.assertEqual(sorted(cfg["markets"]), ["forex", "metals"])
+        self.assertEqual(size.leverage_of(cfg, size.instrument("EURUSD")), 1.0)
 
 
 if __name__ == "__main__":

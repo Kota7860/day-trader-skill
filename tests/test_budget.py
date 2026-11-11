@@ -78,7 +78,11 @@ class TheReel(unittest.TestCase):
 
     def test_config_example_is_the_contract(self):
         with open(CFG) as fh:
-            self.assertEqual(json.load(fh), CONTRACT_CFG)
+            doc = json.load(fh)
+        # forex and metals added two keys; everything a stock trade reads is unchanged
+        self.assertEqual(doc.pop("max_leverage"), 10)
+        self.assertEqual(sorted(doc.pop("markets")), ["forex", "metals"])
+        self.assertEqual(doc, CONTRACT_CFG)
 
     def test_tsla_is_8_shares_bound_by_the_max_loss(self):
         s = size.size_trade(plan(), cfg(), today=TODAY)

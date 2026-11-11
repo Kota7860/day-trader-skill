@@ -21,5 +21,18 @@
   "allow_margin": false,
   "allow_short": false,
   "pdt_guard": false,
+  "max_leverage": 10,
+  "markets": {
+    "forex": {
+      "session": "ny",
+      "broker": "oanda",
+      "unit_step": 1
+    },
+    "metals": {
+      "session": "ny",
+      "broker": "oanda",
+      "unit_step": 1
+    }
+  },
   "sec_user_agent": "Your Name you@example.com"
 }
