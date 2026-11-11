@@ -48,7 +48,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 
 UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
 BACKOFF = 5.0
@@ -57,6 +57,7 @@ INTERVALS = {"1m": 60, "5m": 300}
 DEFAULTS = {"flat_by": "15:55", "min_reward_risk": 1.0}
 ATR_BARS = 14
 MIN_RISK_PCT = Decimal("0.05")     # risk under 0.05% of the price is inside the spread's noise
+MIN_RISK_PCT_FX = Decimal("0.02")  # a major pair's spread is tighter: about 2 pips on EUR/USD
 CENT = Decimal("0.01")
 EPOCH = datetime.datetime(1970, 1, 1)
 NOTE = "A stop is a plan, not a guarantee: a gap or a fast market can fill past it."
@@ -95,6 +96,48 @@ EARLY = datetime.time(13, 0)
 
 class PlanError(Exception):
     pass
+
+
+# ---------------------------------------------------------------- markets (the same rules as trader-entry)
+
+CCYS = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "SEK", "NOK", "DKK", "MXN", "ZAR",
+        "SGD", "HKD", "CNH", "TRY", "PLN", "INR")
+METALS = {"XAUUSD": {"yahoo": "GC=F", "name": "gold", "decimals": 2},
+          "XAGUSD": {"yahoo": "SI=F", "name": "silver", "decimals": 3}}
+METAL_ALIASES = {"XAUUSD": "XAUUSD", "XAU": "XAUUSD", "GC=F": "XAUUSD",
+                 "XAGUSD": "XAGUSD", "XAG": "XAGUSD", "SI=F": "XAGUSD"}
+SESSIONS = {"ny": ("New York", datetime.time(8, 0), datetime.time(17, 0)),
+            "london": ("London", datetime.time(8, 0), datetime.time(16, 30))}
+FX_CLOSED = {"01-01": "New Year's Day", "12-25": "Christmas Day"}
+METAL_CLOSED = {"2026-04-03": "Good Friday", "2027-03-26": "Good Friday"}
+
+
+def instrument(sym):
+    """What a symbol is: {market: stock | forex | metal, symbol, yahoo, decimals, pip, unit}.
+    EURUSD, EUR/USD, EUR_USD and EURUSD=X are one forex pair; XAUUSD, XAU and GC=F are gold."""
+    raw = str(sym or "").strip().upper()
+    flat = re.sub(r"[/_\-\s]", "", raw)
+    if flat.endswith("=X"):
+        flat = flat[:-2]
+    metal = METAL_ALIASES.get(raw) or METAL_ALIASES.get(flat)
+    if metal:
+        m = METALS[metal]
+        return {"market": "metal", "symbol": metal, "yahoo": m["yahoo"], "decimals": m["decimals"],
+                "pip": None, "unit": "ounce", "name": m["name"], "base": metal[:3], "quote": "USD"}
+    if len(flat) == 6 and flat.isalpha() and flat[:3] in CCYS and flat[3:] in CCYS and flat[:3] != flat[3:]:
+        dec = 3 if flat[3:] == "JPY" else 5
+        return {"market": "forex", "symbol": flat, "yahoo": flat + "=X", "decimals": dec,
+                "pip": 10.0 ** -(dec - 1), "unit": "unit", "name": flat[:3] + "/" + flat[3:],
+                "base": flat[:3], "quote": flat[3:]}
+    return {"market": "stock", "symbol": raw, "yahoo": raw.replace(".", "-"), "decimals": 2,
+            "pip": None, "unit": "share", "name": raw, "base": raw, "quote": "USD"}
+
+
+def market_cfg(cfg, inst):
+    """The "markets": {"forex": {...}, "metals": {...}} block of trader/config.json."""
+    key = {"forex": "forex", "metal": "metals"}.get(inst["market"])
+    m = ((cfg or {}).get("markets") or {}).get(key) if key else None
+    return m if isinstance(m, dict) else {}
 
 
 # ---------------------------------------------------------------- time
@@ -191,6 +234,60 @@ def session(d):
     return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
 
 
+def _last_sunday(year, month):
+    d = datetime.date(year + (month == 12), month % 12 + 1, 1) - datetime.timedelta(days=1)
+    return d - datetime.timedelta(days=(d.weekday() + 1) % 7)
+
+
+def london_offset(utc):
+    """Hours from UTC for London: +1 from 1:00 UTC on the last Sunday of March to
+    1:00 UTC on the last Sunday of October, else 0."""
+    y = utc.year
+    start = datetime.datetime.combine(_last_sunday(y, 3), datetime.time(1, 0))
+    end = datetime.datetime.combine(_last_sunday(y, 10), datetime.time(1, 0))
+    return 1 if start <= utc.replace(tzinfo=None) < end else 0
+
+
+def london_to_eastern(local):
+    """A London wall-clock time -> the New York wall-clock time of the same moment."""
+    for off in (1, 0):
+        utc = local - datetime.timedelta(hours=off)
+        if london_offset(utc) == off:
+            return to_eastern(utc)
+    return to_eastern(local)
+
+
+def market_day(inst, d):
+    """(is_trading_day, reason) for the instrument's market."""
+    if inst["market"] == "stock":
+        return (session(d) is not None), "NYSE closed"
+    if d.weekday() >= 5:
+        return False, "weekend"
+    name = FX_CLOSED.get(d.strftime("%m-%d"))
+    if not name and inst["market"] == "metal":
+        name = METAL_CLOSED.get(d.isoformat())
+    if name:
+        return False, "holiday: " + name
+    return True, ""
+
+
+def market_session(inst, d, name="ny"):
+    """(open, close) as New York datetimes on day d, or None if closed all day.
+    A stock's session is the NYSE's; a pair's or a metal's is the named session."""
+    if not market_day(inst, d)[0]:
+        return None
+    if inst["market"] == "stock":
+        o, c = session(d)
+        return datetime.datetime.combine(d, o), datetime.datetime.combine(d, c)
+    if name not in SESSIONS:
+        raise PlanError("--session is %s" % " or ".join(sorted(SESSIONS)))
+    _, o, c = SESSIONS[name]
+    if name == "london":
+        return (london_to_eastern(datetime.datetime.combine(d, o)),
+                london_to_eastern(datetime.datetime.combine(d, c)))
+    return datetime.datetime.combine(d, o), datetime.datetime.combine(d, c)
+
+
 # ---------------------------------------------------------------- money math (Decimal, to the cent)
 
 def D(x, what="a number"):
@@ -216,6 +313,21 @@ def money(x):
     return "$%s" % format(D(x).quantize(CENT), ",f")
 
 
+def tick(inst):
+    """The smallest price step: a cent for a stock, 0.00001 for most pairs."""
+    return Decimal(1).scaleb(-inst["decimals"])
+
+
+def pm(inst, x):
+    """A price for a person: $364.18 for a stock or a metal, 1.11371 for a pair."""
+    q = D(x).quantize(tick(inst))
+    return format(q, "f") if inst["market"] == "forex" else "$%s" % format(q, ",f")
+
+
+def unit_word(inst):
+    return {"stock": "share", "forex": "unit", "metal": "ounce"}[inst["market"]]
+
+
 def num(x):
     """1, 1.5, 2.25: a Decimal without trailing zeros."""
     s = format(D(x).normalize(), "f")
@@ -237,9 +349,12 @@ def parse_stop(text):
         return "or_mid", None
     if t in ("or-low", "or_low", "low"):
         return "or_low", None
-    m = re.match(r"^(price|pct|atr):\s*\$?([0-9][0-9,]*\.?[0-9]*)$", t)
+    if t in ("or-high", "or_high", "high"):
+        return "or_high", None
+    m = re.match(r"^(price|pct|atr|pips):\s*\$?([0-9][0-9,]*\.?[0-9]*)$", t)
     if not m:
-        raise PlanError("--stop is or-mid, or-low, price:X, pct:X or atr:K (got %r)" % text)
+        raise PlanError("--stop is or-mid, or-low, or-high (shorts), price:X, pct:X, atr:K or pips:N "
+                        "(forex) (got %r)" % text)
     kind, val = m.group(1), D(m.group(2), "--stop")
     if val <= 0:
         raise PlanError("--stop %s needs a number above 0" % kind)
@@ -268,64 +383,92 @@ def r_label(r):
 
 
 def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=None, or_low=None,
-            atr=None, atr_bars=None):
-    """The stop, the target and the risk, in exact cents. Raises PlanError with the reason."""
-    e = cents(entry)
+            atr=None, atr_bars=None, inst=None, side="buy"):
+    """The stop, the target and the risk, exact to the instrument's tick. Raises PlanError with the reason.
+    A long's stop is under the entry and rounds DOWN; a short's is above it and rounds UP."""
+    inst = inst or instrument("")
+    long = side != "sell"
+    q = tick(inst)
+    sign = 1 if long else -1
+
+    def M(x):
+        return pm(inst, x)
+
+    e = D(entry).quantize(q, rounding=ROUND_HALF_UP)
     if e <= 0:
         raise PlanError("the entry price must be above $0")
     detail = ""
-    if stop_rule in ("or_mid", "or_low"):
+    where = "under" if long else "above"
+    if stop_rule in ("or_mid", "or_low", "or_high"):
         if or_high is None or or_low is None:
             raise PlanError("an %s stop needs the opening range (--or-high and --or-low)" % stop_rule.replace("_", "-"))
-        oh, ol = cents(or_high), cents(or_low)
+        oh, ol = D(or_high).quantize(q, rounding=ROUND_HALF_UP), D(or_low).quantize(q, rounding=ROUND_HALF_UP)
         if oh <= ol:
-            raise PlanError("the opening-range high %s must be above its low %s" % (money(oh), money(ol)))
+            raise PlanError("the opening-range high %s must be above its low %s" % (M(oh), M(ol)))
         if stop_rule == "or_mid":
             raw = (oh + ol) / 2
             label = "opening-range midpoint"
-            detail = "(%s + %s) / 2 = $%s" % (money(oh), money(ol), num(raw))
-        else:
+            detail = "(%s + %s) / 2 = %s%s" % (M(oh), M(ol), "" if inst["market"] == "forex" else "$", num(raw))
+        elif stop_rule == "or_low":
             raw, label = ol, "opening-range low"
+        else:
+            raw, label = oh, "opening-range high"
     elif stop_rule == "price":
         raw, label = stop_param, "your price"
     elif stop_rule == "pct":
-        raw = e * (1 - stop_param / 100)
-        label = "%s%% under the entry" % num(stop_param)
-        detail = "%s x (1 - %s%%) = $%s" % (money(e), num(stop_param), num(raw))
+        raw = e * (1 - sign * stop_param / 100)
+        label = "%s%% %s the entry" % (num(stop_param), where)
+        detail = "%s x (1 %s %s%%) = %s%s" % (M(e), "-" if long else "+", num(stop_param),
+                                             "" if inst["market"] == "forex" else "$", num(raw))
+    elif stop_rule == "pips":
+        if inst["market"] != "forex":
+            raise PlanError("a pips stop is for forex pairs; use pct:X, price:X or atr:K for %s" % inst["symbol"])
+        raw = e - sign * stop_param * D(repr(inst["pip"]))
+        label = "%s pips %s the entry" % (num(stop_param), where)
     elif stop_rule == "atr":
         if atr is None:
             raise PlanError("an atr stop needs the session's bars")
         a = D(round(atr, 6))
-        raw = e - stop_param * a
-        label = "%s x ATR(%d) under the entry" % (num(stop_param), atr_bars)
-        detail = "ATR $%s over the %d bars to the entry%s" % (
-            num(a.quantize(Decimal("0.0001"))), atr_bars, " (fewer than 14 so far)" if atr_bars < ATR_BARS else "")
+        raw = e - sign * stop_param * a
+        label = "%s x ATR(%d) %s the entry" % (num(stop_param), atr_bars, where)
+        detail = "ATR %s%s over the %d bars to the entry%s" % (
+            "" if inst["market"] == "forex" else "$",
+            num(a.quantize(Decimal("0.0001") if inst["decimals"] <= 2 else q)), atr_bars,
+            " (fewer than 14 so far)" if atr_bars < ATR_BARS else "")
     else:
         raise PlanError("unknown stop rule %r" % stop_rule)
-    stop = floor_cents(raw)
+    stop = D(raw).quantize(q, rounding=ROUND_FLOOR if long else ROUND_CEILING)
     if stop != D(raw):
-        detail = (detail + ", rounded down" if detail else "$%s rounded down" % num(raw))
-    if stop >= e:
+        way = "rounded down" if long else "rounded up"
+        detail = (detail + ", " + way if detail else "%s%s %s" % ("" if inst["market"] == "forex" else "$", num(raw), way))
+    if long and stop >= e:
         raise PlanError("the stop %s (%s) is at or above the entry %s: a long's stop goes under the entry"
-                        % (money(stop), label, money(e)))
+                        % (M(stop), label, M(e)))
+    if not long and stop <= e:
+        raise PlanError("the stop %s (%s) is at or below the entry %s: a short's stop goes above the entry"
+                        % (M(stop), label, M(e)))
     if stop <= 0:
-        raise PlanError("the stop works out to %s: pick a stop above $0" % money(stop))
-    risk = e - stop
-    floor_risk = e * MIN_RISK_PCT / 100
+        raise PlanError("the stop works out to %s: pick a stop above $0" % M(stop))
+    risk = abs(e - stop)
+    min_pct = MIN_RISK_PCT_FX if inst["market"] == "forex" else MIN_RISK_PCT
+    floor_risk = e * min_pct / 100
     if risk < floor_risk:
-        raise PlanError("the stop is %s under the entry, less than 0.05%% of the price (%s on %s): too tight to "
+        raise PlanError("the stop is %s %s the entry, less than %s%% of the price (%s on %s): too tight to "
                         "survive the spread, normal wiggle would stop you out. Widen it."
-                        % (money(risk), money(floor_risk.quantize(CENT, rounding=ROUND_HALF_UP)), money(e)))
+                        % (M(risk), where, num(min_pct), M(floor_risk.quantize(q, rounding=ROUND_HALF_UP)), M(e)))
     if target_rule == "r":
-        target = cents(e + target_param * risk)
+        target = (e + sign * target_param * risk).quantize(q, rounding=ROUND_HALF_UP)
         t_label = r_label(target_param)
     else:
-        target = cents(target_param)
+        target = D(target_param).quantize(q, rounding=ROUND_HALF_UP)
         t_label = None
-    if target <= e:
+    if long and target <= e:
         raise PlanError("the target %s is at or below the entry %s: a long's target goes above it"
-                        % (money(target), money(e)))
-    rr = ((target - e) / risk).quantize(CENT, rounding=ROUND_HALF_UP)
+                        % (M(target), M(e)))
+    if not long and (target >= e or target <= 0):
+        raise PlanError("the target %s must be below the entry %s and above 0: a short's target goes under it"
+                        % (M(target), M(e)))
+    rr = (abs(target - e) / risk).quantize(CENT, rounding=ROUND_HALF_UP)
     if t_label is None:
         t_label = "your price (%sR)" % ratio(rr)
     return {"entry": e, "stop": stop, "stop_label": label, "stop_detail": detail, "target": target,
@@ -391,7 +534,8 @@ def read_text(path):
 
 
 def load_chart(sym, interval, day, offline=None):
-    ysym = sym.upper().replace(".", "-")
+    inst = instrument(sym)
+    ysym = inst["yahoo"]
     if offline:
         path = offline
         if os.path.isdir(offline):
@@ -407,6 +551,8 @@ def load_chart(sym, interval, day, offline=None):
     else:
         back = (to_eastern(utc_now()).date() - day).days
         rng = "1d" if back <= 0 else "5d" if back <= 6 else "1mo" if back <= 28 else "60d"
+        if rng == "1d" and inst["market"] != "stock":
+            rng = "5d"                     # a 24-hour market: Yahoo's "1d" starts at London midnight
         if interval == "1m" and back > 6:
             raise PlanError("Yahoo keeps 1-minute bars for about a week")
         text = yahoo_get("/v8/finance/chart/%s?range=%s&interval=%s" % (ysym, rng, interval))
@@ -439,14 +585,13 @@ def load_chart(sym, interval, day, offline=None):
     return {"bars": bars, "data_time": meta.get("regularMarketTime")}
 
 
-def session_bars(chart, day, interval, upto_slot=None, now_utc=None):
-    """Closed, on-grid bars of one New York session, oldest first (the live tick is dropped)."""
+def session_bars(chart, day, interval, upto_slot=None, now_utc=None, inst=None, session_name="ny"):
+    """Closed, on-grid bars of one session, oldest first (the live tick is dropped)."""
     step = INTERVALS[interval]
-    s = session(day)
+    s = market_session(inst or instrument(""), day, session_name)
     if not s:
         return []
-    open_dt = datetime.datetime.combine(day, s[0])
-    close_dt = datetime.datetime.combine(day, s[1])
+    open_dt, close_dt = s
     if now_utc is None and chart.get("data_time"):
         now_utc = utc_of(chart["data_time"])
     local = to_eastern(now_utc) if now_utc else None
@@ -499,7 +644,34 @@ def read_config(path):
         for k in DEFAULTS:
             if doc.get(k) is not None:
                 cfg[k] = doc[k]
+        if isinstance(doc.get("markets"), dict):
+            cfg["markets"] = doc["markets"]
+        cfg["allow_short"] = doc.get("allow_short") is True
     return cfg
+
+
+def resolve_flat_by_market(inst, day, explicit, cfg, entry_time, session_name):
+    """(HH:MM, note) for a pair or a metal: 5 minutes before the session's close
+    unless you say otherwise, and never past 16:55 New York (the 17:00 rollover,
+    when spreads widen and an open position becomes an overnight hold)."""
+    s = market_session(inst, day, session_name)
+    if not s:
+        raise PlanError("the %s market is closed on %s (%s)" % (
+            "forex" if inst["market"] == "forex" else "metals", day, market_day(inst, day)[1]))
+    last = datetime.time(16, 55)
+    given = explicit or market_cfg(cfg, inst).get("flat_by")
+    if given:
+        t = parse_hhmm(given, "--flat-by" if explicit else "flat_by")
+        if t > last:
+            raise PlanError("flat-by %s is after 16:55 New York: the forex day rolls over at 17:00, so that "
+                            "would be an overnight hold" % hm(t))
+    else:
+        t = min((s[1] - datetime.timedelta(minutes=5)).time(), last)
+    if entry_time and entry_time >= t:
+        raise PlanError("the entry at %s is at or after your flat-by %s: there is no time left to hold it"
+                        % (ampm(entry_time), hm(t)))
+    note = "" if given else "5 minutes before the %s session closes" % SESSIONS[session_name][0]
+    return hm(t), note
 
 
 def resolve_flat_by(day, explicit, cfg, entry_time):
@@ -528,26 +700,32 @@ def gather(a):
     """The entry facts, from trader/entry.json or the flags."""
     if a.symbol and a.from_path:
         raise PlanError("use --from or --symbol, not both")
-    if a.side in ("sell", "short"):
-        raise PlanError("v2 plans longs only: no stops above a short entry. Plan a buy instead.")
+    flag_short = a.side in ("sell", "short")
     if a.symbol:
         if a.entry is None:
             raise PlanError("--symbol needs --entry PRICE")
         if (a.or_high is None) != (a.or_low is None):
             raise PlanError("give both --or-high and --or-low, or neither")
-        info = {"symbol": a.symbol.upper(), "entry": a.entry, "setup": a.setup or ("orb" if a.or_high is not None else "level"),
+        info = {"symbol": instrument(a.symbol)["symbol"], "side": "sell" if flag_short else "buy", "session": a.session,
+                "entry": a.entry, "setup": a.setup or ("orb" if a.or_high is not None else "level"),
                 "date": a.date, "entry_time": a.time, "entry_bar": a.entry_bar, "interval": a.interval or "5m",
                 "or_high": a.or_high, "or_low": a.or_low, "or_minutes": a.or_minutes, "source": "flags"}
     else:
         path = a.from_path or "trader/entry.json"
         doc = read_json(path, "entry (run /trader-entry first, or give --symbol and --entry)")
-        if str(doc.get("side") or "buy").lower() not in ("buy", "long"):
+        doc_side = str(doc.get("side") or "buy").lower()
+        if doc_side not in ("buy", "long", "sell", "short"):
+            raise PlanError("%s has an unknown side %r" % (path, doc.get("side")))
+        doc_short = doc_side in ("sell", "short")
+        if doc_short and instrument(doc.get("symbol"))["market"] == "stock":
             raise PlanError("%s is a %s: v2 plans longs only" % (path, doc.get("side")))
         if doc.get("status") != "triggered" and a.entry is None:
             raise PlanError("%s says %s is %s, not triggered: plan once it triggers, or give --entry PRICE to plan ahead"
                             % (path, doc.get("symbol"), doc.get("status") or "unknown"))
         orr = doc.get("opening_range") or {}
-        info = {"symbol": str(doc.get("symbol") or "").upper(), "entry": a.entry if a.entry is not None else doc.get("price"),
+        info = {"symbol": str(doc.get("symbol") or "").upper(), "side": "sell" if (doc_short or flag_short) else "buy",
+                "session": a.session or doc.get("session"),
+                "entry": a.entry if a.entry is not None else doc.get("price"),
                 "setup": a.setup or doc.get("setup") or "orb", "date": a.date or doc.get("date"),
                 "entry_time": a.time or (doc.get("time") if a.entry is None else None),
                 "entry_bar": a.entry_bar if a.entry_bar is not None else (doc.get("bar_index") if a.entry is None else None),
@@ -559,12 +737,26 @@ def gather(a):
             raise PlanError("%s has no symbol or price" % path)
     if info["interval"] not in INTERVALS:
         raise PlanError("interval is 5m or 1m")
+    inst = instrument(info["symbol"])
+    if info["side"] == "sell" and inst["market"] == "stock":
+        raise PlanError("v2 plans longs only: no stops above a short entry. Plan a buy instead.")
     return info
 
 
 def build_plan(a, now_utc):
     info = gather(a)
     cfg = read_config(a.config)
+    inst = instrument(info["symbol"])
+    stock = inst["market"] == "stock"
+    side = info["side"]
+    if side == "sell" and not cfg.get("allow_short"):
+        raise PlanError('short trades are off. To plan a %s short, set "allow_short": true in trader/config.json '
+                        "(a short loses money when the price rises)" % inst["symbol"])
+    sess = "ny"
+    if not stock:
+        sess = info.get("session") or market_cfg(cfg, inst).get("session") or "ny"
+        if sess not in SESSIONS:
+            raise PlanError("the session is %s, not %r" % (" or ".join(sorted(SESSIONS)), sess))
     stop_text = a.stop
     if not stop_text:
         if info["setup"] != "orb":
@@ -585,19 +777,25 @@ def build_plan(a, now_utc):
     atr = atr_n = None
     if stop_rule == "atr":
         chart = load_chart(info["symbol"], info["interval"], day, a.offline)
-        bars = session_bars(chart, day, info["interval"], info["entry_bar"], parse_now(a.now) if a.now else None)
+        bars = session_bars(chart, day, info["interval"], info["entry_bar"], parse_now(a.now) if a.now else None,
+                            inst, sess)
         if len(bars) < 3:
             raise PlanError("an atr stop needs at least 3 closed %s bars of %s on %s by the entry; found %d"
                             % (info["interval"], info["symbol"], day, len(bars)))
         atr, atr_n = atr_of(bars)
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
-                atr, atr_n)
-    flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
+                atr, atr_n, inst, side)
+    if stock:
+        flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
+    else:
+        flat_by, flat_note = resolve_flat_by_market(inst, day, a.flat_by, cfg, entry_time, sess)
+    q = tick(inst)
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
-        orr = {"high": float(cents(info["or_high"])), "low": float(cents(info["or_low"])),
-               "minutes": int(info["or_minutes"] or 15)}
-    plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": "buy", "date": day.isoformat(),
+        orr = {"high": float(D(info["or_high"]).quantize(q, rounding=ROUND_HALF_UP)),
+               "low": float(D(info["or_low"]).quantize(q, rounding=ROUND_HALF_UP)),
+               "minutes": int(info["or_minutes"] or (15 if stock else 30))}
+    plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": side, "date": day.isoformat(),
             "setup": info["setup"], "entry": float(c["entry"]),
             "entry_time": ampm(entry_time) if entry_time else None,
             "entry_bar": info["entry_bar"], "interval": info["interval"], "opening_range": orr,
@@ -606,10 +804,21 @@ def build_plan(a, now_utc):
             "risk_per_share": float(c["risk"]), "reward_risk": float(c["reward_risk"]), "flat_by": flat_by,
             "stop_detail": c["stop_detail"], "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": NOTE}
     if atr is not None:
-        plan["atr"] = round(atr, 4)
+        plan["atr"] = round(atr, 4 if stock else max(4, inst["decimals"]))
         plan["atr_bars"] = atr_n
     warnings = []
-    if flat_note:
+    if not stock:
+        plan.update(market=inst["market"], session=sess, decimals=inst["decimals"], unit=unit_word(inst))
+        if inst["market"] == "forex":
+            plan["pip"] = inst["pip"]
+            plan["risk_pips"] = float((c["risk"] / D(repr(inst["pip"]))).quantize(Decimal("0.1")))
+            plan["quote_currency"] = inst["quote"]
+        else:
+            plan["price_source"] = "COMEX %s futures (%s)" % (inst["name"], inst["yahoo"])
+            warnings.append("These levels are COMEX %s futures prices. Spot %s at your broker trades a few "
+                            "dollars away: keep the same distances (stop %s, target %s from the entry) on its price."
+                            % (inst["name"], inst["name"], pm(inst, c["risk"]), pm(inst, abs(c["target"] - c["entry"]))))
+    if flat_note and stock:
         warnings.append("Flat-by %s: %s." % (flat_by, flat_note))
     mrr = cfg.get("min_reward_risk")
     try:
@@ -625,8 +834,15 @@ def build_plan(a, now_utc):
 
 
 def describe(plan):
+    inst = instrument(plan["symbol"])
+    stock = inst["market"] == "stock"
+    long = str(plan.get("side") or "buy") != "sell"
     day = datetime.date.fromisoformat(plan["date"])
     setup = {"orb": "opening-range breakout", "level": "close above a level"}.get(plan["setup"], plan["setup"])
+    if not stock:
+        name = SESSIONS.get(plan.get("session") or "ny", SESSIONS["ny"])[0]
+        setup = {"orb": "%s-session range %s" % (name, "breakout" if long else "breakdown"),
+                 "level": "close %s a level" % ("above" if long else "below")}.get(plan["setup"], plan["setup"])
     e = D(plan["entry"])
     risk = D(plan["risk_per_share"])
     pct = (risk / e * 100).quantize(CENT, rounding=ROUND_HALF_UP)
@@ -635,16 +851,25 @@ def describe(plan):
         when = " at %s" % plan["entry_time"]
         if plan.get("entry_bar") is not None:
             when += " (bar %d)" % plan["entry_bar"]
-    out = ["Exit plan: %s long, %s, %s on %s bars" % (
-        plan["symbol"], day.strftime("%a %Y-%m-%d"), setup, "5-minute" if plan["interval"] == "5m" else "1-minute")]
-    out.append("  Entry         %s%s" % (money(plan["entry"]), when))
-    out.append("  Stop          %s  %s%s" % (money(plan["stop"]), plan["stop_label"],
+    out = ["Exit plan: %s %s, %s, %s on %s bars" % (
+        plan["symbol"], "long" if long else "short", day.strftime("%a %Y-%m-%d"), setup,
+        "5-minute" if plan["interval"] == "5m" else "1-minute")]
+    out.append("  Entry         %s%s" % (pm(inst, plan["entry"]), when))
+    out.append("  Stop          %s  %s%s" % (pm(inst, plan["stop"]), plan["stop_label"],
                                              (": " + plan["stop_detail"]) if plan.get("stop_detail") else ""))
-    out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
-    out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
+    out.append("  Target        %s  %s" % (pm(inst, plan["target"]), plan["target_label"]))
+    if stock:
+        out.append("  Risk a share  %s (%s%% of the entry)" % (pm(inst, plan["risk_per_share"]), pct))
+    elif inst["market"] == "forex":
+        out.append("  Risk a unit   %s %s = %s pips (%s%% of the entry)" % (
+            pm(inst, plan["risk_per_share"]), inst["quote"], num(D(plan.get("risk_pips", 0))), pct))
+    else:
+        out.append("  Risk an ounce %s (%s%% of the entry)" % (pm(inst, plan["risk_per_share"]), pct))
     out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
     out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")
+    if not long:
+        out.append("This is a short: it loses when the price RISES, and the stop sits above the entry.")
     out.append(NOTE)
     return out
 
@@ -700,14 +925,16 @@ def main(argv=None):
     p.add_argument("--entry", type=float, help="entry price (or a plan-ahead price with --from)")
     p.add_argument("--or-high", type=float)
     p.add_argument("--or-low", type=float)
-    p.add_argument("--or-minutes", type=int, default=15)
+    p.add_argument("--or-minutes", type=int)
+    p.add_argument("--session", help="forex and metals: ny (default) or london")
     p.add_argument("--setup", choices=["orb", "level"])
     p.add_argument("--date", help="session date YYYY-MM-DD (default: the entry's, or today)")
     p.add_argument("--time", help="entry time, e.g. 10:15 AM")
     p.add_argument("--entry-bar", type=int)
     p.add_argument("--interval", choices=["5m", "1m"])
-    p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"], help="v2: buy only")
-    p.add_argument("--stop", help="or-mid (orb default), or-low, price:X, pct:X, atr:K")
+    p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"],
+                   help="stocks: buy only. Forex and metals: sell needs \"allow_short\": true")
+    p.add_argument("--stop", help="or-mid (orb default), or-low, or-high, price:X, pct:X, atr:K, pips:N (forex)")
     p.add_argument("--target", help="2R (default), 1R, 1.5R, price:X")
     p.add_argument("--flat-by", help="HH:MM New York (default: config flat_by, 15:55)")
     p.add_argument("--config", default="trader/config.json")
