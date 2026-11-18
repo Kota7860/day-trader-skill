@@ -214,6 +214,21 @@ real XBRL facts. They reproduce every number in the example above. The forex
 and metals tests run on Yahoo's 5-minute bars for EUR/USD, USD/JPY, EUR/GBP
 and gold futures for the five days to November 11 2026.
 
+## The interface
+
+Prefer buttons to commands? Run this from your project folder:
+
+```bash
+python3 trader-ui/server.py            # opens http://127.0.0.1:8765
+```
+
+One page walks the same steps: entry, stop and target, size, risk check,
+tickets, quotes, and your rules in `trader/config.json`. It shows what each
+tool printed and the command it ran. A "replay at a past time" box runs the
+steps as of an earlier New York time. It only answers your own computer
+(127.0.0.1), needs nothing installed, and **never places or approves an
+order**: when a ticket is READY, you still say yes in the Claude chat.
+
 ## Fine print
 
 **Not financial advice.** This is software that reads public data and does
