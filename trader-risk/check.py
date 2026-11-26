@@ -128,6 +128,66 @@ class RiskError(Exception):
     pass
 
 
+# ---------------------------------------------------------------- markets (the same rules as trader-entry)
+
+CCYS = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "SEK", "NOK", "DKK", "MXN", "ZAR",
+        "SGD", "HKD", "CNH", "TRY", "PLN", "INR")
+METALS = {"XAUUSD": {"yahoo": "GC=F", "name": "gold", "decimals": 2},
+          "XAGUSD": {"yahoo": "SI=F", "name": "silver", "decimals": 3}}
+METAL_ALIASES = {"XAUUSD": "XAUUSD", "XAU": "XAUUSD", "GC=F": "XAUUSD",
+                 "XAGUSD": "XAGUSD", "XAG": "XAGUSD", "SI=F": "XAGUSD"}
+SESSIONS = {"ny": ("New York", datetime.time(8, 0), datetime.time(17, 0)),
+            "london": ("London", datetime.time(8, 0), datetime.time(16, 30))}
+FX_CLOSED = {"01-01": "New Year's Day", "12-25": "Christmas Day"}
+METAL_CLOSED = {"2026-04-03": "Good Friday", "2027-03-26": "Good Friday"}
+
+
+def instrument(sym):
+    """What a symbol is: {market: stock | forex | metal, symbol, yahoo, decimals, pip, unit}.
+    EURUSD, EUR/USD, EUR_USD and EURUSD=X are one forex pair; XAUUSD, XAU and GC=F are gold."""
+    raw = str(sym or "").strip().upper()
+    flat = re.sub(r"[/_\-\s]", "", raw)
+    if flat.endswith("=X"):
+        flat = flat[:-2]
+    metal = METAL_ALIASES.get(raw) or METAL_ALIASES.get(flat)
+    if metal:
+        m = METALS[metal]
+        return {"market": "metal", "symbol": metal, "yahoo": m["yahoo"], "decimals": m["decimals"],
+                "pip": None, "unit": "ounce", "name": m["name"], "base": metal[:3], "quote": "USD"}
+    if len(flat) == 6 and flat.isalpha() and flat[:3] in CCYS and flat[3:] in CCYS and flat[:3] != flat[3:]:
+        dec = 3 if flat[3:] == "JPY" else 5
+        return {"market": "forex", "symbol": flat, "yahoo": flat + "=X", "decimals": dec,
+                "pip": 10.0 ** -(dec - 1), "unit": "unit", "name": flat[:3] + "/" + flat[3:],
+                "base": flat[:3], "quote": flat[3:]}
+    return {"market": "stock", "symbol": raw, "yahoo": raw.replace(".", "-"), "decimals": 2,
+            "pip": None, "unit": "share", "name": raw, "base": raw, "quote": "USD"}
+
+
+def market_cfg(cfg, inst):
+    """The "markets": {"forex": {...}, "metals": {...}} block of trader/config.json."""
+    key = {"forex": "forex", "metal": "metals"}.get(inst["market"])
+    m = ((cfg or {}).get("markets") or {}).get(key) if key else None
+    return m if isinstance(m, dict) else {}
+
+
+MAX_LEVERAGE = {"forex": 50.0, "metal": 20.0}   # the US retail caps
+DEFAULT_LEVERAGE = 10.0
+
+
+def leverage_of(cfg, inst):
+    """1 unless "allow_margin": true; then "max_leverage" (10 if you gave none). Same rule as trader-budget."""
+    if not cfg.get("allow_margin"):
+        return 1.0
+    lev = _f(market_cfg(cfg, inst).get("max_leverage")) or _f(cfg.get("max_leverage")) or DEFAULT_LEVERAGE
+    cap = MAX_LEVERAGE[inst["market"]]
+    if lev < 1:
+        raise RiskError("max_leverage must be 1 or more")
+    if lev > cap:
+        raise RiskError("max_leverage %s is over %d:1, the most this pack allows for %s"
+                        % (_num(lev), cap, "forex" if inst["market"] == "forex" else "metals"))
+    return lev
+
+
 # ---------------------------------------------------------------- time (New York, no tz files)
 
 def _nth_sunday(year, month, n):
@@ -242,6 +302,91 @@ def window_check(now_et, c):
     return [], warns
 
 
+def _last_sunday(year, month):
+    d = datetime.date(year + (month == 12), month % 12 + 1, 1) - datetime.timedelta(days=1)
+    return d - datetime.timedelta(days=(d.weekday() + 1) % 7)
+
+
+def london_offset(utc):
+    """Hours from UTC for London: +1 from 1:00 UTC on the last Sunday of March to
+    1:00 UTC on the last Sunday of October, else 0."""
+    y = utc.year
+    start = datetime.datetime.combine(_last_sunday(y, 3), datetime.time(1, 0))
+    end = datetime.datetime.combine(_last_sunday(y, 10), datetime.time(1, 0))
+    return 1 if start <= utc.replace(tzinfo=None) < end else 0
+
+
+def london_to_eastern(local):
+    """A London wall-clock time -> the New York wall-clock time of the same moment."""
+    for off in (1, 0):
+        utc = local - datetime.timedelta(hours=off)
+        if london_offset(utc) == off:
+            return to_eastern(utc)
+    return to_eastern(local)
+
+
+def market_day(inst, d):
+    """(is_trading_day, reason) for the instrument's market."""
+    if inst["market"] == "stock":
+        return trading_day(d)
+    if d.weekday() >= 5:
+        return False, "weekend"
+    name = FX_CLOSED.get(d.strftime("%m-%d"))
+    if not name and inst["market"] == "metal":
+        name = METAL_CLOSED.get(d.isoformat())
+    if name:
+        return False, "holiday: " + name
+    return True, ""
+
+
+def market_session(inst, d, name="ny"):
+    """(open, close) as New York datetimes on day d, or None if closed all day.
+    A stock's session is the NYSE's; a pair's or a metal's is the named session."""
+    if not market_day(inst, d)[0]:
+        return None
+    if inst["market"] == "stock":
+        return (datetime.datetime.combine(d, OPEN),
+                datetime.datetime.combine(d, EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE))
+    if name not in SESSIONS:
+        raise RiskError("--session is %s" % " or ".join(sorted(SESSIONS)))
+    _, o, c = SESSIONS[name]
+    if name == "london":
+        return (london_to_eastern(datetime.datetime.combine(d, o)),
+                london_to_eastern(datetime.datetime.combine(d, c)))
+    return datetime.datetime.combine(d, o), datetime.datetime.combine(d, c)
+
+
+def market_window_check(now_et, inst, session_name, c):
+    """Reasons a forex or metals entry cannot be placed now. The window is the plan's
+    session (New York 8:00 to 17:00, or London), less the last 90 minutes unless the
+    market's "no_entries_after" says otherwise."""
+    word = "forex" if inst["market"] == "forex" else "metals"
+    stamp = now_et.strftime("%a %Y-%m-%d %H:%M")
+    d = now_et.date()
+    ok, why = market_day(inst, d)
+    if not ok:
+        return ["window: the %s market is closed today (%s, %s New York)" % (word, why, stamp)]
+    if session_name not in SESSIONS:
+        return ["window: unknown session %r (ny or london)" % session_name]
+    open_dt, close_dt = market_session(inst, d, session_name)
+    name = SESSIONS[session_name][0]
+    if not (open_dt <= now_et < close_dt):
+        return ["window: outside the %s session (%s New York; the session is %s to %s New York time)"
+                % (name, stamp, open_dt.strftime("%H:%M"), close_dt.strftime("%H:%M"))]
+    m = market_cfg(c, inst)
+    before = hhmm(m.get("no_entries_before"), "no_entries_before")
+    after = hhmm(m.get("no_entries_after"), "no_entries_after")
+    after_dt = datetime.datetime.combine(d, after) if after else close_dt - datetime.timedelta(minutes=90)
+    t = now_et.replace(second=0, microsecond=0)
+    if before and t < datetime.datetime.combine(d, before):
+        return ["window: no new %s entries before %s New York (it is %s)" % (word, before.strftime("%H:%M"),
+                                                                             t.strftime("%H:%M"))]
+    if t > after_dt:
+        return ["window: no new %s entries after %s New York (it is %s)" % (word, after_dt.strftime("%H:%M"),
+                                                                            t.strftime("%H:%M"))]
+    return []
+
+
 def business_days(today, n=5):
     """The last n NYSE trading days up to and including today, newest first."""
     out, d = [], today
@@ -323,6 +468,11 @@ def account(cfg, portfolio, prices):
             basis = sum(_f(l.get("cost")) or 0 for l in p.get("lots", []))
             values[t] = basis
             warnings.append("no price for %s: valued at its cost basis %s" % (t, money(basis)))
+    for p in portfolio.get("margin_positions", []):     # forex and metals: signed units, no cash value
+        t = str(p.get("symbol") or "").upper()
+        n = _f(p.get("units"))
+        if t and n:
+            shares[t] = shares.get(t, 0) + n
     return {"cash": cash, "shares": shares, "values": values}, warnings
 
 
@@ -360,6 +510,8 @@ def day_trades(state, today):
         if d not in days:
             continue
         key = (d, str(rec.get("symbol", "")).upper())
+        if instrument(key[1])["market"] != "stock":
+            continue                     # the pattern-day-trader rule is about stocks
         sides.setdefault(key, set()).add(str(rec.get("side", "")).lower())
         if d == today and rec.get("status") == "placed" and rec_is_entry(rec):
             sides[key].add("pending")
@@ -415,7 +567,222 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         age = (now_utc - t).total_seconds()
         return prices[sym] if -60 <= age <= FRESH_MINUTES * 60 else None
 
+    def check_market(i, o, sym, inst):
+        """One forex or metals order. qty is UNITS (1 of the base currency, or 1 ounce);
+        dollars come from the plan's quote_usd rate; leverage only scales the size limits."""
+        nonlocal batch_entries, batch_loss
+        reasons, warns, info, later = [], [], [], []
+        dec = inst["decimals"]
+        tol = 0.5 * 10 ** -dec
+        word = "forex" if inst["market"] == "forex" else "metals"
+        unit = "ounces" if inst["market"] == "metal" else "units"
+
+        def P(x):
+            return "%.*f" % (dec, float(x))
+
+        side = str(o.get("side", "")).strip().lower()
+        typ = str(o.get("type", "market")).strip().lower()
+        plan = o.get("plan") if isinstance(o.get("plan"), dict) else {}
+        q = _f(o.get("qty"))
+        long = side == "buy"
+        if side not in ("buy", "sell"):
+            reasons.append("format: side must be buy or sell, got %r" % o.get("side"))
+        if o.get("notional") is not None or q is None or q <= 0:
+            reasons.append("format: a %s order needs a positive qty in %s, not a dollar amount" % (word, unit))
+            q = None
+        elif abs(q - round(q)) > 1e-9:
+            reasons.append("format: qty must be whole %s, got %r" % (unit, o.get("qty")))
+        for k in ("limit_price", "take_profit_limit_price", "stop_loss_stop_price"):
+            if o.get(k) is not None and (_f(o.get(k)) is None or _f(o.get(k)) <= 0):
+                reasons.append("format: %s must be a positive number, got %r" % (k, o.get(k)))
+        if typ not in ("market", "limit"):
+            reasons.append("format: a %s order here is market or limit, got %r" % (word, typ))
+        if typ == "limit" and o.get("limit_price") is None:
+            reasons.append("format: a limit order needs a limit_price")
+
+        held = acct["shares"].get(sym, 0.0)
+        exiting = q is not None and ((side == "sell" and held > 1e-9 and q <= held + 1e-9) or
+                                     (side == "buy" and held < -1e-9 and q <= -held + 1e-9))
+        kind = "exit" if exiting else "entry"
+
+        plan_entry, live = _f(plan.get("entry")), fresh(sym)
+        ref, ref_from = None, None
+        if typ == "limit":
+            ref, ref_from = _f(o.get("limit_price")), "limit"
+        if ref is None:
+            cands = [(p_, w) for p_, w in ((plan_entry, "plan"), (live, "price")) if p_]
+            if cands:
+                ref, ref_from = (max if long else min)(cands, key=lambda x: x[0])
+                ref = round(ref, dec)
+                if ref_from == "price" and plan_entry and abs(live - plan_entry) > tol:
+                    info.append("%s last %s is worse than the plan's entry %s: the risk is measured from %s"
+                                % (sym, P(ref), P(plan_entry), P(ref)))
+            elif sym in prices:
+                ref, ref_from = prices[sym], "stale price"
+        leg_stop, plan_stop = _f(o.get("stop_loss_stop_price")), _f(plan.get("stop"))
+        stop = leg_stop if leg_stop else plan_stop
+        target = _f(o.get("take_profit_limit_price")) or _f(plan.get("target"))
+        q2u = None
+        if inst["quote"] == "USD":
+            q2u = 1.0
+        elif inst["base"] == "USD" and ref:
+            q2u = 1.0 / min(ref, stop or ref)
+        elif _f(plan.get("quote_usd")):
+            q2u = _f(plan.get("quote_usd"))
+        elif _f(prices.get(inst["quote"] + "USD")):
+            q2u = prices[inst["quote"] + "USD"]
+        value = q * ref * q2u if (q and ref and q2u) else None
+        try:
+            lev = leverage_of(c, inst)
+        except RiskError as e:
+            reasons.append("leverage: %s" % e)
+            lev = 1.0
+        if kind == "entry" and value is None and q:
+            later.append("price: no %s for %s to value %s %s; size it with trader-budget (size.py%s)"
+                         % ("dollar rate" if ref else "price", sym, o.get("qty"), unit,
+                            "" if ref and q2u is None else " --quote-usd RATE" if ref else ""))
+        if sym in blocked:
+            later.append("blocked: %s is on your blocked list" % sym)
+        margin = None
+        if value is not None:
+            margin = value / lev
+            if value < float(c.get("min_order_usd") or 0) - CENT:
+                later.append("size: %s is under your %s minimum order" % (money(value), money(c["min_order_usd"])))
+            own_max = _f(market_cfg(c, inst).get("max_order_usd"))
+            max_order = own_max or (_f(c.get("max_order_usd")) or 0) * lev
+            if max_order and value > max_order + CENT:
+                later.append("size: the position is worth %s, over your %s max order%s"
+                             % (money(value), money(max_order),
+                                "" if own_max or lev == 1 else " (%s x %s leverage)" % (money(c["max_order_usd"]), _num(lev))))
+            cash = acct["cash"]
+            total = cash + sum(acct["values"].values())
+            buffer_usd = total * float(c.get("cash_buffer_pct") or 0) / 100.0
+            if kind == "entry":
+                how = "it is worth %s" % money(value) if lev == 1 else \
+                    "it is worth %s and needs about %s of margin at %s:1" % (money(value), money(margin), _num(lev))
+                if margin > cash + CENT:
+                    later.append("cash: %s, but you have %s cash%s" % (
+                        how, money(cash), "; leverage is off (\"allow_margin\": false)" if lev == 1 else ""))
+                elif cash - margin < buffer_usd - CENT:
+                    later.append("cash: %s, leaving %s free, under your %s%% buffer of %s"
+                                 % (how, money(max(cash - margin, 0)), _pct(c["cash_buffer_pct"]), money(buffer_usd)))
+                cap = total * float(c.get("max_position_pct") or 100) / 100.0 * lev
+                pos_after = abs(held) * ref * q2u + value
+                if total > 0 and pos_after > cap + CENT:
+                    later.append("position: %s would be worth %s, over your %s%% cap of the %s account%s (%s)"
+                                 % (sym, money(pos_after), _pct(c["max_position_pct"]), money(total),
+                                    "" if lev == 1 else " x %s leverage" % _num(lev), money(cap)))
+        if side == "sell" and kind == "entry" and not c.get("allow_short"):
+            reasons.append("short: selling %s you do not hold is a short, and short selling is off "
+                           "(\"allow_short\": false). If you bought it, record the fill first (ticket.py fill)" % sym)
+
+        max_loss = risk_ps = rr = None
+        if kind == "entry" and side in ("buy", "sell"):
+            if leg_stop and plan_stop and abs(leg_stop - plan_stop) > tol:
+                warns.append("the bracket stop %s differs from the plan's stop %s: the bracket's is the one "
+                             "the broker uses" % (P(leg_stop), P(plan_stop)))
+            if stop and not leg_stop:
+                warns.append("the stop %s is in the plan only, not at the broker" % P(stop))
+            if not stop:
+                if c.get("require_stop", True):
+                    later.append("stop: no stop. Every entry needs one (\"require_stop\": true): a bracket "
+                                 "stop_loss_stop_price, from trader-exit and trader-budget")
+                else:
+                    warns.append("no stop: the max loss is not capped, so it is not counted in the daily loss")
+            elif ref:
+                if (long and stop >= ref - tol) or (not long and stop <= ref + tol):
+                    later.append("stop: the stop %s must be %s the entry %s for a %s"
+                                 % (P(stop), "below" if long else "above", P(ref), side))
+                elif q and q2u:
+                    risk_ps = round(abs(ref - stop), dec)
+                    max_loss = round(q * risk_ps * q2u, 2)
+                    cap = _f(c.get("max_loss_per_trade_usd"))
+                    if cap and max_loss > cap + CENT:
+                        later.append("loss: %s %s x %s %s risk a unit = %s at the stop, over your %s max loss "
+                                     "per trade" % (_num(q), unit, P(risk_ps), inst["quote"], money(max_loss), money(cap)))
+                    min_rr = _f(c.get("min_reward_risk"))
+                    if target:
+                        if (long and target <= ref + tol) or (not long and target >= ref - tol):
+                            later.append("target: the target %s must be %s the entry %s"
+                                         % (P(target), "above" if long else "below", P(ref)))
+                        else:
+                            rr = round(abs(target - ref) / risk_ps, 2)
+                            if min_rr and rr < min_rr - 1e-9:
+                                later.append("reward:risk: %.2f (target %s, entry %s, stop %s) is under your "
+                                             "minimum %s" % (rr, P(target), P(ref), P(stop), _num(min_rr)))
+                    elif min_rr:
+                        later.append("reward:risk: no target to measure it against (min_reward_risk %s)"
+                                     % _num(min_rr))
+            daily = _f(c.get("max_daily_loss_usd"))
+            if daily and max_loss is not None:
+                used = loss_today + batch_loss
+                if used + max_loss > daily + CENT:
+                    later.append("daily loss: %s already at risk today plus %s for this one = %s, over your %s "
+                                 "daily loss limit" % (money(used), money(max_loss), money(used + max_loss),
+                                                       money(daily)))
+            cap_t = int(c.get("max_trades_per_day") or 0)
+            if cap_t and len(entries_today) + batch_entries >= cap_t:
+                later.append("trades: %d entries placed today plus %d passed earlier in this batch, your limit "
+                             "is %d a day" % (len(entries_today), batch_entries, cap_t))
+            later.extend(market_window_check(now_et, inst, str(plan.get("session") or
+                                                             market_cfg(c, inst).get("session") or "ny"), c))
+            if stop and ref and risk_ps:
+                pips = (" = %.1f pips" % (risk_ps / inst["pip"])) if inst["pip"] else ""
+                info.append("entry %s (%s), stop %s, target %s: risk %s %s a unit%s"
+                            % (P(ref), REF_WORDS.get(ref_from, ref_from), P(stop),
+                               P(target) if target else "none", P(risk_ps), inst["quote"], pips))
+                info.append("max loss %s%s, reward:risk %s%s"
+                            % (money(max_loss), (" (limit %s)" % money(c["max_loss_per_trade_usd"]))
+                               if _f(c.get("max_loss_per_trade_usd")) else "",
+                               ("%.2f" % rr) if rr is not None else "n/a",
+                               (" (min %s)" % _num(c["min_reward_risk"])) if _f(c.get("min_reward_risk")) else ""))
+            if value is not None:
+                info.append("position worth %s%s" % (money(value), "" if lev == 1 else
+                                                     ", about %s of margin at %s:1" % (money(margin), _num(lev))))
+            if inst["market"] == "metal":
+                warns.append("levels are COMEX %s futures prices: on spot %s at your broker keep the same "
+                             "distances from its own price" % (inst["name"], inst["name"]))
+            if not long:
+                warns.append("short trade: it loses when the price rises")
+
+        key = (sym, side)
+        if key in seen:
+            later.append("duplicate: a second %s %s in this batch" % (side, sym))
+        if key in placed_keys:
+            later.append("duplicate: a %s %s was already placed today" % (side, sym))
+        passed_so_far = sum(1 for r in results if r["verdict"] == "PASS")
+        cap_n = int(c.get("max_orders_per_day") or 0)
+        if cap_n and count_today + passed_so_far >= cap_n:
+            later.append("daily limit: %d placed today plus %d passed earlier in this batch, "
+                         "your limit is %d a day" % (count_today, passed_so_far, cap_n))
+        seen.add(key)
+        if kind == "entry":
+            reasons.extend(later)
+        else:
+            warns.extend("exit, not blocked: " + x for x in later)
+        verdict = "BLOCK" if reasons else "PASS"
+        if verdict == "PASS" and q:
+            if kind == "entry":
+                batch_entries += 1
+                batch_loss += max_loss or 0.0
+                acct["cash"] -= margin or 0.0          # margin set aside for the rest of this batch
+            acct["shares"][sym] = held + (q if long else -q)
+        return {
+            "index": i, "symbol": sym, "side": side, "kind": kind, "market": inst["market"],
+            "amount": "%s %s" % (o.get("qty"), unit),
+            "value_usd": round(value, 2) if value is not None else None,
+            "entry_ref": round(ref, dec) if ref else None, "entry_ref_from": ref_from,
+            "stop": stop, "target": target, "risk_per_share": risk_ps, "max_loss": max_loss,
+            "reward_risk": rr, "fingerprint": fingerprint(o), "verdict": verdict,
+            "reasons": reasons, "warnings": warns, "info": info,
+        }
+
     for i, o in enumerate(orders, 1):
+        m_sym = str(o.get("symbol", "")).strip().upper()
+        m_inst = instrument(m_sym)
+        if m_sym and m_inst["market"] != "stock":
+            results.append(check_market(i, o, m_inst["symbol"], m_inst))
+            continue
         reasons, warns, info = [], [], []
         later = []                       # entry-only reasons, turned into warnings for an exit
         sym = str(o.get("symbol", "")).strip().upper()

@@ -5,14 +5,14 @@ import unittest
 
 from _load import ROOT
 
-# v2, the day-trading pack: the eleven folders the reel's repo card shows
-SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
+# v2, the day-trading pack: the reel's eleven folders, plus the forex market
+SKILLS = ["trader-forex", "trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
           "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
           "trader-pelosi"]
-ABOUT = ("11 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
-         "entry and exit, and replay every outcome before you risk a dollar.")
+ABOUT = ("12 Claude skills for day trading stocks, forex and gold: scan thousands of charts, track breaking "
+         "news, time every entry and exit, and replay every outcome before you risk a dollar.")
 # skills on the way to an order carry the safety block
-ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
+ORDER_PATH = ["trader-forex", "trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
               "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts"]
 V1_ONLY = ["trader-copycat", "trader-screener", "trader-tax", "trader-rebalance"]
 
@@ -33,14 +33,14 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
+    def test_twelve_skill_folders_at_the_root(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))
 
     def test_root_matches_the_reel(self):
         root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests", "trader-ui"] + SKILLS))
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
@@ -73,8 +73,8 @@ class Repo(unittest.TestCase):
             readme = " ".join(fh.read().split())
         self.assertTrue(readme.startswith("# The Day Trader skill"))
         for line in (ABOUT,
-                     "https://github.com/Jakeschincariol/day-trader-skill install skill",
-                     "/plugin marketplace add Jakeschincariol/day-trader-skill",
+                     "https://github.com/Kota7860/day-trader-skill install skill",
+                     "/plugin marketplace add Kota7860/day-trader-skill",
                      "/plugin install day-trader-skill@day-trader-skill",
                      "## Fine print"):
             self.assertIn(line, readme)

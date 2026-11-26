@@ -156,6 +156,15 @@ and never calls a result a sure thing. It never prints a P&L or a profit.
 It never uses a bar that has not closed yet, and never mixes today's bars
 into the pool.
 
+## Forex and metals
+
+The Time Machine replays NYSE sessions only. Given a plan for a pair
+(`EURUSD`) or a metal (`XAUUSD`), it stops and says so: its odds come from
+a stock's 9:30 to 16:00 bars, and a forex or metals session has a different
+shape. For those plans skip this step and say plainly that no replay was
+run. Do not quote stock odds for a forex trade. trader-budget and
+trader-risk still apply.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

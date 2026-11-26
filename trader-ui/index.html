@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day Trader</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --ink: #1b1f24; --muted: #5b6470; --line: #dde1e6;
+  --accent: #2557d6; --accent-ink: #ffffff; --ok: #1f7a3d; --bad: #b42318; --warn: #8a5a00;
+  --code: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111418; --card: #1a1e24; --ink: #e8ebef; --muted: #9aa3ad; --line: #2c323a;
+          --accent: #6d95ff; --accent-ink: #0b1020; --ok: #5cc982; --bad: #ff7b72; --warn: #e3b341; --code: #13171c; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 18px 16px 8px; max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0; }
+.banner { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--warn);
+          background: var(--card); border-radius: 8px; color: var(--muted); }
+main { max-width: 1100px; margin: 0 auto; padding: 8px 16px 40px; display: grid; gap: 14px;
+       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+@media (max-width: 820px) { main { grid-template-columns: minmax(0, 1fr); } }
+section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-width: 0; }
+section.wide { grid-column: 1 / -1; }
+h2 { font-size: 16px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+.n { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+     background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 700; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); flex: 1 1 120px; }
+input, select, textarea { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+                          border-radius: 6px; padding: 7px 8px; width: 100%; }
+textarea { font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; min-height: 220px; }
+button { font: inherit; font-weight: 600; border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer;
+         background: var(--accent); color: var(--accent-ink); }
+button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+button:disabled { opacity: .55; cursor: wait; }
+pre { margin: 10px 0 0; padding: 10px; background: var(--code); border-radius: 6px; overflow-x: auto;
+      font: 12.5px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre; }
+.cmd { color: var(--muted); font-size: 12px; margin-top: 8px; word-break: break-all; }
+.status { font-weight: 700; }
+.ok { color: var(--ok); } .bad { color: var(--bad); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.fact { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.fact b { display: block; font-size: 12px; color: var(--muted); font-weight: 500; }
+.hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Day Trader</h1>
+  <p class="sub">Stocks, forex pairs, gold and silver. Each step saves to <code id="proj">trader/</code> and the next step reads it.</p>
+  <p class="banner">This page never places or approves an order. When a ticket is READY, say <b>yes</b> for that one order in the Claude chat (<code>/trader-broker</code>). Not financial advice. Paper trade first.</p>
+</header>
+<main>
+  <section class="wide">
+    <h2>Now</h2>
+    <div class="facts" id="facts"></div>
+    <div class="row" style="margin-top:10px">
+      <label>Replay at a past New York time (optional)<input id="now" placeholder="2026-11-09 08:55"></label>
+      <button class="ghost" onclick="refresh()">Refresh files</button>
+    </div>
+  </section>
+
+  <section class="wide">
+    <h2>Forex market</h2>
+    <div class="row">
+      <label>Session<select id="f-session"><option value="ny">New York</option><option value="london">London</option></select></label>
+      <label>Pairs<select id="f-group"><option value="all">all 23</option><option value="majors">majors</option><option value="crosses">crosses</option><option value="metals">gold and silver</option></select></label>
+      <button onclick="run('forex', {session: v('f-session'), group: v('f-group')})">Scan pairs</button>
+      <button class="ghost" onclick="run('sessions', {})">Which sessions are open?</button>
+    </div>
+    <p class="hint">Hits go to trader/watchlist.json. Put one in Entry below. Stocks use the Chart Scanner skill.</p>
+    <div id="out-forex"></div>
+    <div id="out-sessions"></div>
+  </section>
+
+  <section>
+    <h2><span class="n">1</span> Entry</h2>
+    <div class="row">
+      <label>Symbol<input id="e-symbol" value="EURUSD" placeholder="EURUSD, XAUUSD, TSLA"></label>
+      <label>Session<select id="e-session"><option value="">default</option><option value="ny">New York</option><option value="london">London</option></select></label>
+      <label>Side<select id="e-side"><option value="buy">buy</option><option value="sell">sell (needs allow_short)</option></select></label>
+      <button onclick="run('entry', {symbol: v('e-symbol'), session: v('e-session'), side: v('e-side')})">Check</button>
+    </div>
+    <p class="hint">Session applies to forex and metals. Stocks use the 9:30 NYSE open.</p>
+    <div id="out-entry"></div>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span> Stop and target</h2>
+    <div class="row">
+      <label>Stop<input id="x-stop" placeholder="or-mid, pips:10, pct:1, atr:1.5"></label>
+      <label>Target<input id="x-target" value="2R" placeholder="2R, 1.5R, price:1.1250"></label>
+      <button onclick="run('exit', {stop: v('x-stop'), target: v('x-target')})">Plan</button>
+    </div>
+    <div id="out-exit"></div>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span> Size</h2>
+    <div class="row">
+      <label>Limit price (optional, blank = market)<input id="b-limit" placeholder="1.12020"></label>
+      <button onclick="run('budget', {limit: v('b-limit')})">Size it</button>
+    </div>
+    <div id="out-budget"></div>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span> Risk check</h2>
+    <div class="row"><button onclick="run('risk', {})">Check against my rules</button></div>
+    <div id="out-risk"></div>
+  </section>
+
+  <section class="wide">
+    <h2><span class="n">5</span> Tickets</h2>
+    <div class="row"><button onclick="run('tickets', {})">Show tickets</button></div>
+    <p class="hint">Read only. To place a READY ticket, answer yes in the Claude chat.</p>
+    <div id="out-tickets"></div>
+  </section>
+
+  <section>
+    <h2>Quotes</h2>
+    <div class="row">
+      <label>Symbols<input id="q-syms" value="EURUSD USDJPY XAUUSD"></label>
+      <button onclick="run('quote', {symbols: v('q-syms')})">Get quotes</button>
+    </div>
+    <div id="out-quote"></div>
+  </section>
+
+  <section>
+    <h2>My rules (trader/config.json)</h2>
+    <textarea id="cfg" spellcheck="false"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button onclick="saveCfg()">Save rules</button>
+      <button class="ghost" onclick="loadExample()">Start from the example</button>
+    </div>
+    <div id="out-cfg"></div>
+  </section>
+</main>
+<script>
+function v(id) { return document.getElementById(id).value.trim(); }
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+  const j = await r.json().catch(() => ({error: "bad response"}));
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+
+async function run(step, fields) {
+  const box = document.getElementById("out-" + step);
+  const btns = box.parentElement.querySelectorAll("button");
+  btns.forEach(b => b.disabled = true);
+  box.replaceChildren(el("p", "hint", "Running..."));
+  try {
+    const now = v("now");
+    const res = await api("/api/run", Object.assign({step: step, now: now}, fields));
+    const head = el("div", "status " + (res.code === 0 ? "ok" : "bad"), res.code === 0 ? "Done" : "Stopped: see the reason below");
+    const out = el("pre", null, (res.stdout || "") + (res.stderr ? "\n" + res.stderr : ""));
+    box.replaceChildren(head, out, el("div", "cmd", res.command));
+  } catch (e) {
+    box.replaceChildren(el("div", "status bad", e.message));
+  }
+  btns.forEach(b => b.disabled = false);
+  refresh();
+}
+
+function fact(label, value) {
+  const d = el("div", "fact"); d.append(el("b", null, label), document.createTextNode(value)); return d;
+}
+
+async function refresh() {
+  try {
+    const s = await api("/api/state");
+    document.getElementById("proj").textContent = s.project + "/trader/";
+    const f = s.files, facts = document.getElementById("facts");
+    const items = [];
+    const e = f.entry, p = f.plan, o = f.orders && f.orders.orders, r = f.risk, c = f.config;
+    items.push(fact("Entry", e ? (e.symbol + " " + e.side + ": " + e.status + (e.price ? " at " + e.price : "")) : "none yet"));
+    items.push(fact("Plan", p ? (p.symbol + " stop " + p.stop + ", target " + p.target + (p.risk_pips != null ? " (" + p.risk_pips + " pips)" : "")) : "none yet"));
+    items.push(fact("Order", o && o.length ? (o[0].side + " " + o[0].qty + " " + o[0].symbol) : "none yet"));
+    items.push(fact("Risk check", r ? (r.pass + " passed, " + r.block + " blocked (" + r.date + ")") : "not run"));
+    items.push(fact("Account", c ? ((c.paper === false ? "LIVE" : "paper") + ", budget $" + (c.budget || "?") +
+      ", shorts " + (c.allow_short ? "on" : "off") + ", leverage " + (c.allow_margin ? "on" : "off")) : "no config yet"));
+    if (f.portfolio && f.portfolio.cash != null) items.push(fact("Cash", "$" + f.portfolio.cash));
+    facts.replaceChildren.apply(facts, items);
+    const cfg = document.getElementById("cfg");
+    if (!cfg.dataset.touched) cfg.value = c ? JSON.stringify(c, null, 2) : "";
+  } catch (err) {
+    document.getElementById("facts").replaceChildren(el("div", "status bad", "The server is not answering: " + err.message));
+  }
+}
+
+async function saveCfg() {
+  const box = document.getElementById("out-cfg");
+  try {
+    await api("/api/config", {text: document.getElementById("cfg").value});
+    delete document.getElementById("cfg").dataset.touched;
+    box.replaceChildren(el("p", "status ok", "Saved."));
+    refresh();
+  } catch (e) { box.replaceChildren(el("p", "status bad", e.message)); }
+}
+
+async function loadExample() {
+  const r = await fetch("/api/example-config");
+  const cfg = document.getElementById("cfg");
+  cfg.value = await r.text(); cfg.dataset.touched = "1";
+  document.getElementById("out-cfg").replaceChildren(el("p", "hint", "Edit, then Save rules. Not saved yet."));
+}
+
+document.getElementById("cfg").addEventListener("input", e => e.target.dataset.touched = "1");
+refresh();
+</script>
+</body>
+</html>

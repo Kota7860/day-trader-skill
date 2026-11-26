@@ -531,6 +531,11 @@ def load_plan(a, now_utc):
 def normalize_plan(raw, src="flags"):
     """A plan dict (trader/plan.json shape) -> the checked plan the time machine runs."""
     sym = str(raw.get("symbol") or "").strip().upper()
+    if raw.get("market") in ("forex", "metal") or re.match(
+            r"^(XAU|XAG)(USD)?$|^(USD|EUR|GBP|JPY|CHF|CAD|AUD|NZD)[/_]?(USD|EUR|GBP|JPY|CHF|CAD|AUD|NZD)(=X)?$", sym):
+        raise TMError("the Time Machine replays NYSE sessions only: it cannot replay %s yet. Its odds are built "
+                      "from a stock's 9:30 to 16:00 bars, and a forex or metals session has a different shape. "
+                      "Skip this step for forex and metals; trader-budget and trader-risk still apply" % sym)
     if not re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", sym):
         raise TMError("the plan needs a ticker symbol, got %r" % raw.get("symbol"))
     side = str(raw.get("side") or "buy").lower()

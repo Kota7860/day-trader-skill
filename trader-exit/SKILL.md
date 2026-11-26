@@ -8,7 +8,10 @@ description: >-
   cent, and sets the target at 2R (or 1R, or your price). Refuses a stop at or
   above the entry, a target at or below it, or a stop too tight to survive the
   spread, and says why. Writes trader/plan.json for the Time Machine, the
-  Budget Manager and Price Alerts. Long side only. Use when the user says
+  Budget Manager and Price Alerts. Stocks are long only. Forex pairs and
+  gold or silver plan to the pip, take a pips:N stop, go flat before the
+  17:00 New York rollover, and can plan a short when the config allows it.
+  Use when the user says
   "where's my stop", "set my stop and target", "plan the exit", "when do I get
   out", "stop loss", "what's my R", "risk reward", or right after
   /trader-entry triggers, before /trader-timemachine.
@@ -119,6 +122,38 @@ sizes it: a $50 max loss per trade buys floor(50 / 5.86) = 8 shares.
 
 It never places an order, never sizes a position, never widens a stop to
 make a plan pass, and never calls a stop a guarantee.
+
+## Forex and metals
+
+A plan for a pair or a metal works the same way, with these differences:
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop pips:10 --target 2R --write      # from trader/entry.json
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol USD/JPY --entry 158.38 --stop pips:15 --session london
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol XAUUSD --entry 4052.2 --or-high 4088 --or-low 4075.6 \
+    --side sell --stop or-low --target 1R                                          # a short; needs allow_short
+```
+
+- **Prices round to the market's tick**, not the cent: 0.00001 for most
+  pairs, 0.001 for yen pairs and silver, 0.01 for gold.
+- **`pips:N`** is a stop N pips from the entry, for pairs only. The plan
+  also reports `risk_pips`.
+- **A short is mirrored:** the stop sits ABOVE the entry and rounds up, the
+  target sits below. `or-high` is the range-high stop for a short. Shorts
+  need `"allow_short": true` in the config; stocks stay long only.
+- **Flat-by** defaults to 5 minutes before the session closes (16:55 for
+  `ny`, about 11:25 New York for `london`) and can never be later than
+  16:55 New York. The forex day rolls over at 17:00: spreads widen and an
+  open position becomes an overnight hold with a financing charge.
+- **The too-tight check** is 0.02% of the price for pairs (about 2 pips on
+  EUR/USD) and 0.05% for metals.
+- **Metals levels are COMEX futures prices.** The plan says so and gives the
+  stop and target as distances too. At the broker the user keeps the
+  distances on the broker's own spot price, never the futures prices.
+
+The plan gains `market`, `session`, `decimals`, and for pairs `pip`,
+`risk_pips` and `quote_currency`. `risk_per_share` is the risk per unit (one
+unit of the base currency, or one ounce).
 
 ## Safety
 

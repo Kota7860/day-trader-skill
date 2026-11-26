@@ -1,6 +1,6 @@
 # The Day Trader skill
 
-11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
+12 Claude skills for day trading stocks, forex and gold: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read free
 public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
@@ -26,7 +26,7 @@ an order on its own. Paper trading is the default.
 Paste this into Claude:
 
 ```
-https://github.com/Jakeschincariol/day-trader-skill
+https://github.com/Kota7860/day-trader-skill
 
 install skill
 ```
@@ -34,7 +34,7 @@ install skill
 Or as a plugin, in Claude Code:
 
 ```
-/plugin marketplace add Jakeschincariol/day-trader-skill
+/plugin marketplace add Kota7860/day-trader-skill
 /plugin install day-trader-skill@day-trader-skill
 ```
 
@@ -43,7 +43,7 @@ Claude Code namespaces plugin skills, so installed as a plugin they show up as
 plain `/trader-scanner`:
 
 ```bash
-git clone https://github.com/Jakeschincariol/day-trader-skill.git
+git clone https://github.com/Kota7860/day-trader-skill.git
 cp -r day-trader-skill/trader-* ~/.claude/skills/
 ```
 
@@ -57,10 +57,11 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+## The twelve
 
 | command | job | what it does |
 | --- | --- | --- |
+| `/trader-forex` | Forex Market | The currency market's scanner: 21 pairs plus gold and silver, which sessions are open, and which pairs broke out of the session's range. |
 | `/trader-scanner` | Chart Scanner | Scans thousands of charts for setups: opening-range breakouts, flags, oversold bounces. |
 | `/trader-news` | News Monitor | Tracks breaking news on every stock you watch and flags what moves it. |
 | `/trader-entry` | Entry Timer | Watches a setup bar by bar and tells you the moment to get in. |
@@ -79,7 +80,7 @@ Everything lands in a `trader/` folder in your project, and each skill reads
 what the last one wrote:
 
 ```
-scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
+scanner or forex -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
 alerts: stop, target, flat by the close                                       (while it is open)
 news / analyst / pelosi                                                        (on a schedule)
 ```
@@ -120,6 +121,75 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
+## Forex, gold and silver
+
+`/trader-forex` is the forex market's own skill, the way `/trader-scanner`
+is for US stocks:
+
+```bash
+python3 trader-forex/forex.py sessions               # Sydney, Tokyo, London, New York: open now?
+python3 trader-forex/forex.py scan                   # every pair, New York session breakouts
+python3 trader-forex/forex.py scan --session london  # or the London session
+```
+
+It knows 21 major and cross pairs plus gold and silver, and writes its hits
+to `trader/watchlist.json` for `/trader-entry`. Seven more skills work on
+currency pairs and metals. Write the symbol
+any usual way: `EURUSD`, `EUR/USD`, `USDJPY`, `XAUUSD` (gold), `XAGUSD`
+(silver).
+
+```
+forex -> entry -> exit -> budget -> risk -> broker     (one trade)
+alerts: stop, target, flat before the 17:00 New York rollover
+```
+
+An example on real data, EUR/USD on Monday November 9 2026:
+
+1. **`/trader-entry`**: the New York session's first 30 minutes ran 1.11957
+   to 1.11995. The 8:50 bar closed at 1.12020, 2.5 pips over the top:
+   triggered at 8:55 AM.
+2. **`/trader-exit`**: stop at the range midpoint, 1.11976 (4.4 pips);
+   target 1.5 times that risk, 1.12086; flat by 16:55 New York.
+3. **`/trader-budget`** with a $5,000 account and no leverage: 3,347 units
+   (0.03 lots, worth $3,749), bound by the position cap. Max loss at the
+   stop: $1.47.
+4. **`/trader-risk`**: PASS. **`/trader-broker`** shows the ticket in units
+   and pips with the order as an OANDA v20 body, and asks for your yes.
+
+What is different from stocks:
+
+- **Sessions, not the opening bell.** These markets trade around the clock
+  on weekdays, so the opening range is the start of the New York session
+  (8:00 to 17:00 New York) or the London session (`--session london`). All
+  times are New York time.
+- **Units and pips.** Positions are sized in units of the base currency (or
+  ounces of metal), prices keep the market's decimals, and the loss is
+  converted to dollars for yen and cross pairs.
+- **Leverage and shorts are off until you turn them on.** With
+  `"allow_margin": false` a position can be no bigger than your cash, which
+  makes forex trades small: that is the point of the default. With it on,
+  `"max_leverage"` (10 by default, never over 50 for forex or 20 for metals)
+  raises the size limits but never the max loss per trade. `"allow_short":
+  true` lets the entry timer, the planner and the rest handle a sell. Stocks
+  stay long only.
+- **Gold and silver prices are COMEX futures** (`GC=F`, `SI=F`), about 10
+  minutes delayed, because there is no free spot feed. Spot gold at a broker
+  trades a few dollars away, so the metals ticket gives the stop and target
+  as distances from your fill, not as prices to copy.
+- **A different broker.** Alpaca does not trade forex or spot metals. The
+  ticket is written for OANDA. This pack has not verified an OANDA connector
+  for Claude, so without one you enter the order by hand in your broker's
+  platform, after the same risk check and the same yes.
+
+Not covered yet: the Chart Scanner scans US stocks only (forex has its own),
+the Time Machine
+replays NYSE sessions only and refuses a forex or metals plan, the News
+Monitor has no economic calendar, and the Earnings Analyst and Pelosi Tracker
+are about stocks by nature. Crypto is not supported.
+
+Leveraged forex and metals trading can lose more than the margin you put up,
+and most retail accounts lose money at it. Paper trade first.
+
 ## The tools
 
 All standard-library Python. The data tools read public endpoints and are
@@ -141,6 +211,9 @@ python3 trader-alerts/alerts.py add --from-plan                        # stop, t
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
 python3 trader-analyst/facts.py TSLA                                   # quarters, growth, EPS
 python3 trader-pelosi/ptr.py index --member pelosi                     # her PTRs this year
+python3 trader-entry/entry.py check EURUSD --session london            # a forex pair, London session
+python3 trader-exit/exit.py plan --stop pips:10 --target 2R --write    # a stop in pips
+python3 trader-alerts/alerts.py quote EUR/USD XAUUSD                   # forex and gold quotes
 ```
 
 ```bash
@@ -150,7 +223,24 @@ python3 -m unittest discover -s tests -v
 The tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
 for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
-real XBRL facts. They reproduce every number in the example above.
+real XBRL facts. They reproduce every number in the example above. The forex
+and metals tests run on Yahoo's 5-minute bars for EUR/USD, USD/JPY, EUR/GBP
+and gold futures for the five days to November 11 2026.
+
+## The interface
+
+Prefer buttons to commands? Run this from your project folder:
+
+```bash
+python3 trader-ui/server.py            # opens http://127.0.0.1:8765
+```
+
+One page walks the same steps: entry, stop and target, size, risk check,
+tickets, quotes, and your rules in `trader/config.json`. It shows what each
+tool printed and the command it ran. A "replay at a past time" box runs the
+steps as of an earlier New York time. It only answers your own computer
+(127.0.0.1), needs nothing installed, and **never places or approves an
+order**: when a ticket is READY, you still say yes in the Claude chat.
 
 ## Fine print
 
@@ -199,6 +289,7 @@ wash sales likely. Nothing here is tax advice.
 ## Files
 
 ```
+trader-forex/       SKILL.md, forex.py
 trader-scanner/     SKILL.md, scan.py
 trader-news/        SKILL.md, news.py
 trader-entry/       SKILL.md, entry.py
@@ -210,6 +301,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
+trader-ui/          server.py, index.html (the local web interface)
 tests/              unittest suite + offline fixtures
 ```
 
