@@ -10,9 +10,9 @@ description: >-
   and logs each trade's max loss so trader-risk can hold the daily limit.
   Forex and metals tickets show units and pips, the order as an OANDA v20
   body, and distances instead of futures prices for gold and silver. Covers
-  setting up Alpaca's official MCP server in Claude Desktop (paper by
-  default, keys in env vars, never in chat), the Interactive Brokers
-  connector, and setting order tools to "Needs approval". Use when the user
+  Alpaca's official MCP server in Claude Desktop (paper by default, keys
+  never in chat), the Interactive Brokers connector, and setting order tools
+  to "Needs approval". Use when the user
   says "place the order", "buy it", "execute", "send it to my broker",
   "close my position", "flatten", "get me out", "connect Alpaca", "set up
   paper trading", or after /trader-risk passes.

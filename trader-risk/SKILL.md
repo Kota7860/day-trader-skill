@@ -9,14 +9,12 @@ description: >-
   more than your trades per day, and no new entries outside your entry
   window or when the market is closed. It also keeps the basics: blocked
   tickers, order size, position cap, cash buffer, margin, short sales,
-  options and crypto, forex and metals orders (units, pips, the session
-  window, leverage and shorts only if the config allows them), malformed or
-  bad bracket orders, duplicates and a daily
-  order limit. Getting out is never blocked by a day limit. Prints PASS or
+  options and crypto, forex and metals orders (units, pips, their session),
+  bad bracket orders, duplicates and a daily order limit. Getting out is never blocked by a day limit. Prints PASS or
   BLOCK with the reason and records the verdicts so trader-broker only shows
   an order that passed. Use when the user says "check my order", "is this
   safe", "risk check", "does this break my rules", "can I take this trade",
-  "how much have I risked today", or before /trader-broker, always.
+  or before /trader-broker, always.
 argument-hint: "[path to orders.json]"
 ---
 

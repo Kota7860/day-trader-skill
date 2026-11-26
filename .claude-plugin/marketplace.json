@@ -3,8 +3,8 @@
   "name": "day-trader-skill",
   "description": "The Day Trader skill pack for Claude: the Trader skill v2",
   "owner": {
-    "name": "Jake Schincariol",
-    "url": "https://opusjake.ai"
+    "name": "Kota7860",
+    "url": "https://github.com/Kota7860"
   },
   "plugins": [
     {
@@ -12,7 +12,7 @@
       "description": "Twelve Claude skills for day trading stocks, forex and gold: a chart scanner, a forex market scanner with its trading sessions, a news monitor, an entry timer, an exit planner, a time machine that replays 10,000 sessions, a risk manager, a budget manager, an order executor (paper by default, never without your yes), price alerts, an earnings analyst and a Pelosi tracker.",
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/Jakeschincariol/day-trader-skill"
+      "homepage": "https://github.com/Kota7860/day-trader-skill"
     }
   ]
 }

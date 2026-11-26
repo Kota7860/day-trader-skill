@@ -53,7 +53,9 @@ class ForexError(Exception):
 
 def _load_entry():
     """trader-entry's entry.py, the sibling folder: one rule for a breakout, not two."""
-    path = os.path.join(os.path.dirname(HERE), "trader-entry", "entry.py")
+    path = os.path.join(HERE, "entry.py")          # bundled copy (a skill uploaded on its own)
+    if not os.path.exists(path):
+        path = os.path.join(os.path.dirname(HERE), "trader-entry", "entry.py")
     if not os.path.exists(path):
         raise ForexError("trader-forex needs the trader-entry skill next to it (%s): install the whole pack" % path)
     spec = importlib.util.spec_from_file_location("trader_entry_for_forex", path)
