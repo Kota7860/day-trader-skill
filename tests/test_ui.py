@@ -22,6 +22,14 @@ class Commands(unittest.TestCase):
                                     "--now", "2026-11-09 08:55"])
         self.assertTrue(argv[1].endswith(os.path.join("trader-entry", "entry.py")))
 
+    def test_forex_scan_and_sessions(self):
+        argv = ui.build_argv("forex", {"session": "london", "group": "majors", "now": "2026-11-23 10:00"})
+        self.assertTrue(argv[1].endswith(os.path.join("trader-forex", "forex.py")))
+        self.assertEqual(argv[2:], ["scan", "--session", "london", "--group", "majors", "--now", "2026-11-23 10:00"])
+        self.assertEqual(ui.build_argv("sessions", {})[2:], ["sessions"])
+        with self.assertRaises(ui.InputError):
+            ui.build_argv("forex", {"group": "everything"})
+
     def test_bad_input_is_refused_before_anything_runs(self):
         for step, data in (("entry", {"symbol": "EURUSD; rm -rf /"}), ("entry", {}),
                            ("entry", {"symbol": "EURUSD", "session": "tokyo"}),

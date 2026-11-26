@@ -31,10 +31,12 @@ TOOLS = {
     "risk": os.path.join(ROOT, "trader-risk", "check.py"),
     "tickets": os.path.join(ROOT, "trader-broker", "ticket.py"),
     "quote": os.path.join(ROOT, "trader-alerts", "alerts.py"),
+    "forex": os.path.join(ROOT, "trader-forex", "forex.py"),
+    "sessions": os.path.join(ROOT, "trader-forex", "forex.py"),
 }
 FILES = {"config": "config.json", "entry": "entry.json", "plan": "plan.json", "orders": "orders.json",
          "risk": os.path.join("state", "risk.json"), "portfolio": "portfolio.json",
-         "broker": os.path.join("state", "broker.json")}
+         "broker": os.path.join("state", "broker.json"), "watchlist": "watchlist.json"}
 SYMBOL = re.compile(r"^[A-Za-z][A-Za-z0-9./_=\-]{0,11}$")
 NOW = re.compile(r"^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}$")
 STOP = re.compile(r"^(or-mid|or-low|or-high|(price|pct|atr|pips):\d+(\.\d+)?)$")
@@ -95,6 +97,17 @@ def build_argv(step, data):
         return py + when
     if step == "tickets":
         return py + ["show"] + when
+    if step == "sessions":
+        return py + ["sessions"] + when
+    if step == "forex":
+        argv = py + ["scan"]
+        session = _pick(data, "session", choices=("ny", "london"))
+        group = _pick(data, "group", choices=("all", "majors", "crosses", "metals"))
+        if session:
+            argv += ["--session", session]
+        if group:
+            argv += ["--group", group]
+        return argv + when
     syms = str(data.get("symbols") or "").split()
     if not syms or len(syms) > 12 or not all(SYMBOL.match(s) for s in syms):
         raise InputError("symbols: up to 12 tickers or pairs, separated by spaces")

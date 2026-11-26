@@ -66,6 +66,19 @@ pre { margin: 10px 0 0; padding: 10px; background: var(--code); border-radius: 6
     </div>
   </section>
 
+  <section class="wide">
+    <h2>Forex market</h2>
+    <div class="row">
+      <label>Session<select id="f-session"><option value="ny">New York</option><option value="london">London</option></select></label>
+      <label>Pairs<select id="f-group"><option value="all">all 23</option><option value="majors">majors</option><option value="crosses">crosses</option><option value="metals">gold and silver</option></select></label>
+      <button onclick="run('forex', {session: v('f-session'), group: v('f-group')})">Scan pairs</button>
+      <button class="ghost" onclick="run('sessions', {})">Which sessions are open?</button>
+    </div>
+    <p class="hint">Hits go to trader/watchlist.json. Put one in Entry below. Stocks use the Chart Scanner skill.</p>
+    <div id="out-forex"></div>
+    <div id="out-sessions"></div>
+  </section>
+
   <section>
     <h2><span class="n">1</span> Entry</h2>
     <div class="row">

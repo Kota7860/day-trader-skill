@@ -1,6 +1,6 @@
 # The Day Trader skill
 
-11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
+12 Claude skills for day trading stocks, forex and gold: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read free
 public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
@@ -57,10 +57,11 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+## The twelve
 
 | command | job | what it does |
 | --- | --- | --- |
+| `/trader-forex` | Forex Market | The currency market's scanner: 21 pairs plus gold and silver, which sessions are open, and which pairs broke out of the session's range. |
 | `/trader-scanner` | Chart Scanner | Scans thousands of charts for setups: opening-range breakouts, flags, oversold bounces. |
 | `/trader-news` | News Monitor | Tracks breaking news on every stock you watch and flags what moves it. |
 | `/trader-entry` | Entry Timer | Watches a setup bar by bar and tells you the moment to get in. |
@@ -79,7 +80,7 @@ Everything lands in a `trader/` folder in your project, and each skill reads
 what the last one wrote:
 
 ```
-scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
+scanner or forex -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
 alerts: stop, target, flat by the close                                       (while it is open)
 news / analyst / pelosi                                                        (on a schedule)
 ```
@@ -122,12 +123,23 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 
 ## Forex, gold and silver
 
-Seven of the skills also work on currency pairs and metals. Write the symbol
+`/trader-forex` is the forex market's own skill, the way `/trader-scanner`
+is for US stocks:
+
+```bash
+python3 trader-forex/forex.py sessions               # Sydney, Tokyo, London, New York: open now?
+python3 trader-forex/forex.py scan                   # every pair, New York session breakouts
+python3 trader-forex/forex.py scan --session london  # or the London session
+```
+
+It knows 21 major and cross pairs plus gold and silver, and writes its hits
+to `trader/watchlist.json` for `/trader-entry`. Seven more skills work on
+currency pairs and metals. Write the symbol
 any usual way: `EURUSD`, `EUR/USD`, `USDJPY`, `XAUUSD` (gold), `XAGUSD`
 (silver).
 
 ```
-entry -> exit -> budget -> risk -> broker     (one trade)
+forex -> entry -> exit -> budget -> risk -> broker     (one trade)
 alerts: stop, target, flat before the 17:00 New York rollover
 ```
 
@@ -169,7 +181,8 @@ What is different from stocks:
   for Claude, so without one you enter the order by hand in your broker's
   platform, after the same risk check and the same yes.
 
-Not covered yet: the Chart Scanner scans US stocks only, the Time Machine
+Not covered yet: the Chart Scanner scans US stocks only (forex has its own),
+the Time Machine
 replays NYSE sessions only and refuses a forex or metals plan, the News
 Monitor has no economic calendar, and the Earnings Analyst and Pelosi Tracker
 are about stocks by nature. Crypto is not supported.
@@ -276,6 +289,7 @@ wash sales likely. Nothing here is tax advice.
 ## Files
 
 ```
+trader-forex/       SKILL.md, forex.py
 trader-scanner/     SKILL.md, scan.py
 trader-news/        SKILL.md, news.py
 trader-entry/       SKILL.md, entry.py
@@ -287,6 +301,7 @@ trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
+trader-ui/          server.py, index.html (the local web interface)
 tests/              unittest suite + offline fixtures
 ```
 
